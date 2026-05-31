@@ -1,0 +1,25 @@
+# Run before every commit:  uv run pre-commit install
+# Manual full run:           uv run pre-commit run --all-files
+# Bump hook versions:        uv run pre-commit autoupdate
+#
+# ruff is the single Python tool — lint + import-sort (the `I` rule, replacing
+# isort) + black-compatible formatting (ruff-format). No black/isort needed.
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.15
+    hooks:
+      # Linter (with autofix) + import sorting. Runs first so the formatter
+      # operates on already-fixed code.
+      - id: ruff
+        args: [--fix]
+      # black-compatible formatter.
+      - id: ruff-format
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-toml
+      - id: check-added-large-files

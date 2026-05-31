@@ -1,0 +1,50 @@
+# parser-service — local / single-host deployment.
+#   docker compose up --build        # build + run on http://localhost:8000
+#   curl localhost:8000/health
+#
+# The image bundles pandoc, LibreOffice, tesseract, and libmagic (see
+# Dockerfile). All tunables are PARSER_* env vars (see .env.example / config.py).
+
+services:
+  parser:
+    build:
+      context: .
+      # Bump PANDOC_VERSION here if you want a different pinned pandoc.
+      args:
+        PANDOC_VERSION: "3.9.0.2"
+    image: parser-service:latest
+    ports:
+      - "${PARSER_PORT:-8000}:8000"
+    # Pick up PARSER_* overrides from a local .env if present (optional).
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      # Sensible defaults; uncomment/override as needed (or set in .env).
+      PARSER_LOG_LEVEL: "${PARSER_LOG_LEVEL:-INFO}"
+      # PARSER_VERIFY_MIME: "true"
+      # PARSER_DEFAULT_OUTPUT_MODE: "markdown"   # markdown | structured | both
+      # PARSER_IMAGE_OCR_ENGINE: "auto"          # tesseract | gemini | auto
+      # PARSER_GEMINI_API_KEY: "..."             # needed only for gemini OCR
+      # PARSER_MARKITDOWN_TIMEOUT_S: "60"
+    # Parsing is CPU-bound and the dispatch path blocks (soffice/worker
+    # subprocesses), so run a few uvicorn workers for real concurrency.
+    command:
+      - uvicorn
+      - app.main:app
+      - --host
+      - "0.0.0.0"
+      - --port
+      - "8000"
+      - --workers
+      - "${UVICORN_WORKERS:-2}"
+    restart: unless-stopped
+    # LibreOffice + tesseract are memory-hungry on large files; cap so one
+    # pathological upload can't OOM the host. Tune to your box.
+    mem_limit: "${PARSER_MEM_LIMIT:-2g}"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 15s
+      retries: 3

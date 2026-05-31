@@ -1,0 +1,81 @@
+[project]
+name = "parser-service"
+version = "0.1.0"
+description = "Multi-format document -> markdown parser service for RAG ingestion"
+authors = [
+    { name = "Hemalv02", email = "mominulislam-2021411216@cs.du.ac.bd" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115",
+    "lxml>=5,<6",
+    "markdownify>=0.13",
+    "markitdown[docx,pptx,xlsx]>=0.1,<0.2",
+    "olefile==0.47",
+    "openpyxl>=3,<4",
+    "pandas>=2,<3",
+    "pdfplumber>=0.11,<0.12",
+    "pillow>=11",
+    "pydantic-settings>=2.6",
+    "pylatexenc>=2,<3",
+    "python-magic>=0.4.27",
+    "python-multipart>=0.0.12",
+    "tabulate>=0.9,<1",
+    "uvicorn[standard]>=0.32",
+]
+
+[project.scripts]
+parser-service = "app.cli:main"
+
+[project.optional-dependencies]
+gemini = [
+    "google-genai>=1.0",
+]
+
+[build-system]
+requires = ["uv_build>=0.9.27,<0.10.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+# Package lives at the project root as `app/` (not the default src layout).
+module-name = "app"
+module-root = ""
+
+[dependency-groups]
+dev = [
+    "fpdf2>=2.7",
+    "httpx>=0.27",
+    "mypy>=1.13",
+    "pre-commit>=4.6.0",
+    "pytest>=8.3",
+    "python-docx>=1.1",
+    "ruff>=0.8",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+# Vendored third-party code is kept verbatim — don't lint it.
+extend-exclude = ["app/vendor"]
+
+[tool.ruff.lint]
+# ruff is the single tool: "I" = import sorting (replaces isort), and
+# `ruff format` (below, via the formatter hook) is black-compatible.
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.ruff.format]
+# Defaults are black-compatible; line length inherits [tool.ruff].line-length.
+
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI's parameter markers are the idiomatic way to declare request
+# inputs in defaults — not the mutable-default footgun B008 targets.
+extend-immutable-calls = ["fastapi.File", "fastapi.Depends", "fastapi.Query", "fastapi.Form"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+exclude = ["app/vendor"]
