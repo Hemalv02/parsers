@@ -13,9 +13,9 @@ handled the way it is, with alternatives.
 | Group | Extensions | Engine |
 |---|---|---|
 | PDF | `.pdf` | per-page `pdfplumber` + vendored form detection (`## Page N`) |
-| Word | `.docx`, `.doc`* | pandoc + vendored OMML→LaTeX (equations) |
-| PowerPoint | `.pptx`, `.ppt`*, `.pps`*, `.pot`*, `.ppsx`* | markitdown |
-| Excel | `.xlsx`, `.xlsm`, `.xls`* | markitdown |
+| Word | `.docx`, `.doc`*, `.odt`* | pandoc + vendored OMML→LaTeX (equations) |
+| PowerPoint | `.pptx`, `.ppt`*, `.pps`*, `.pot`*, `.ppsx`*, `.odp`* | markitdown |
+| Excel | `.xlsx`, `.xlsm`, `.xls`*, `.ods`* | markitdown |
 | Tabular | `.csv`, `.tsv` | pandas → markitdown fallback |
 | Email | `.eml`, `.msg`, `.mbox`/`.mbx` | stdlib `email`/`mailbox` + markitdown (msg) |
 | Image | `.png`, `.jpg`, `.jpeg`, `.tiff`, `.tif`, `.gif`, `.bmp`, `.webp` | tesseract (default) or Gemini |
@@ -23,7 +23,9 @@ handled the way it is, with alternatives.
 | Web/RTF | `.html`, `.htm`, `.rtf` | pandoc |
 | Data | `.json` | fenced passthrough |
 
-`*` legacy binary formats are round-tripped through LibreOffice (`soffice`).
+`*` legacy binary **and OpenDocument** (`.odt/.ods/.odp`) formats are
+round-tripped to OOXML through LibreOffice (`soffice`), then parsed natively —
+so they get the same markdown/metadata/embedded-image handling as `.docx` etc.
 
 Text inside images embedded in **PPTX/DOCX** can additionally be OCR'd into a
 `## Embedded image text` section — opt-in via `PARSER_OCR_EMBEDDED_IMAGES`
