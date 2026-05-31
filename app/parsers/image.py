@@ -18,10 +18,38 @@ class ImageParser(BaseParser):
 
     def parse(self, path: Path, mode: str) -> ParseResult:
         data = path.read_bytes()
-        md, body, used = convert_image(data, path.name)
-        structured = {"text": body, "engine": used} if self.wants_structured(mode) else None
+        md, body, used, fields = convert_image(data, path.name)
+
+        structured = None
+        if self.wants_structured(mode):
+            structured = {"text": body, "engine": used}
+            for k in (
+                "has_meaningful_text",
+                "document_type",
+                "scene_type",
+                "detected_objects",
+                "confidence",
+            ):
+                if fields.get(k) not in (None, "", []):
+                    structured[k] = fields[k]
+
+        # Promote the document/scene classification into the normalized metadata
+        # (RAG filtering); dimensions come from the image header.
+        metadata = self._metadata(data)
+        for k in ("document_type", "scene_type"):
+            if fields.get(k):
+                metadata[k] = fields[k]
+
+        # Surface Gemini token usage for cost tracking (backend parity).
+        stats = {}
+        tokens = {
+            k: fields[k] for k in ("input_tokens", "output_tokens", "total_tokens") if k in fields
+        }
+        if any(tokens.values()):
+            stats["gemini_tokens"] = tokens
+
         return ParseResult(
-            parser=used, markdown=md, structured=structured, metadata=self._metadata(data)
+            parser=used, markdown=md, structured=structured, metadata=metadata, stats=stats
         )
 
     @staticmethod

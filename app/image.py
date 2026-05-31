@@ -8,10 +8,14 @@ not cover. The askturing backend handles images with a multimodal LLM
   - "tesseract" (default fallback): local pytesseract OCR. Offline,
     deterministic, no API key. Good for text-bearing images (scans,
     screenshots of documents). Produces plain transcribed text.
-  - "gemini": multimodal OCR + a short visual description, matching the
-    backend. Requires the `gemini` extra (`uv sync --extra gemini`) and
-    `PARSER_GEMINI_API_KEY`. Better on photos, diagrams, charts, and
-    images where layout/visual context matters for retrieval.
+  - "gemini": the backend's strategy, ported verbatim from
+    `app/services/image/processing_service.py` — TWO structured Gemini calls,
+    an OCR pass (`_OCRResult`: has_meaningful_text / document_type /
+    extracted_text / confidence) and a visual-analysis pass
+    (`_VisualAnalysisResult`: summary / detected_objects / scene_type) —
+    combined into one searchable block (`_combine`, mirroring the backend's
+    `get_searchable_text`). Token usage is tracked for cost. Requires the
+    `gemini` extra (`uv sync --extra gemini`) and `PARSER_GEMINI_API_KEY`.
 
 The engine is chosen by `settings.resolve_image_engine()` ("auto" picks
 gemini when a key is present, else tesseract). Run inside the worker
@@ -31,6 +35,9 @@ from .config import settings
 
 log = logging.getLogger("parser.image")
 
+# Gemini supports PNG/JPEG/WebP/HEIC but not TIFF/GIF (backend's note).
+_GEMINI_NATIVE = {"PNG": "image/png", "JPEG": "image/jpeg", "WEBP": "image/webp"}
+
 # Extensions Pillow/tesseract can open. Mirrors the set the backend
 # accepts; tesseract reads all of these, Pillow normalizes for Gemini.
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".tiff", ".tif", ".gif", ".bmp", ".webp"}
@@ -40,19 +47,41 @@ IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".tiff", ".tif", ".gif", ".bmp", ".webp"}
 _EMPTY_OCR = {"_(no text detected in image)_", "_(no content extracted)_"}
 
 
-def convert_image(data: bytes, filename: str) -> tuple[str, str, str]:
-    """Convert image bytes. Returns (markdown, body_text, parser_used).
+def convert_image(data: bytes, filename: str) -> tuple[str, str, str, dict]:
+    """Convert image bytes. Returns (markdown, body_text, parser_used, fields).
 
-    `body_text` is the OCR/description content without the `# Image:`
-    heading — used for the structured representation.
+    `body_text` is the OCR/description content without the `# Image:` heading
+    (used for the structured representation). `fields` carries the engine's
+    extra signals — empty for tesseract; for Gemini it mirrors the backend:
+    has_meaningful_text, document_type, scene_type, detected_objects,
+    confidence, and token usage.
     """
     engine = settings.resolve_image_engine()
     if engine == "gemini":
-        body, used = _ocr_gemini(data)
+        body, used, fields = _ocr_gemini(data)
     else:
-        body, used = _ocr_tesseract(data)
+        body, used, fields = _ocr_tesseract(data)
     md = f"# Image: {filename}\n\n{body}"
-    return md, body, used
+    return md, body, used, fields
+
+
+def _to_rgb(img):
+    """Convert to RGB, compositing transparency onto WHITE (backend's
+    `_convert_to_rgb`). A plain `.convert("RGB")` turns alpha/palette
+    transparency black, which wrecks OCR on screenshots/logos — white-
+    background compositing preserves legibility."""
+    from PIL import Image
+
+    if img.mode == "RGB":
+        return img
+    if img.mode == "L":
+        return img.convert("RGB")
+    if img.mode in ("RGBA", "P"):
+        rgba = img.convert("RGBA") if img.mode == "P" else img
+        background = Image.new("RGB", rgba.size, (255, 255, 255))
+        background.paste(rgba, mask=rgba.split()[3] if "A" in rgba.getbands() else None)
+        return background
+    return img.convert("RGB")
 
 
 def ocr_embedded_images(images: list[tuple[str, bytes]]) -> tuple[str, dict]:
@@ -103,7 +132,7 @@ def ocr_embedded_images(images: list[tuple[str, bytes]]) -> tuple[str, dict]:
             skipped += 1
             continue
         try:
-            _md, body, _used = convert_image(data, label)
+            _md, body, _used, _fields = convert_image(data, label)
         except Exception:
             log.debug("embedded image %s: OCR failed, skipping", label, exc_info=True)
             skipped += 1
@@ -126,7 +155,7 @@ def ocr_embedded_images(images: list[tuple[str, bytes]]) -> tuple[str, dict]:
 # ---------------------------------------------------------------------------
 
 
-def _ocr_tesseract(data: bytes) -> tuple[str, str]:
+def _ocr_tesseract(data: bytes) -> tuple[str, str, dict]:
     """Local OCR by piping the image to the `tesseract` binary on stdin.
 
     We call tesseract directly (`tesseract - stdout`) rather than via the
@@ -145,8 +174,7 @@ def _ocr_tesseract(data: bytes) -> tuple[str, str]:
     from PIL import Image
 
     with Image.open(io.BytesIO(data)) as img:
-        if img.mode not in ("RGB", "L"):
-            img = img.convert("RGB")
+        img = _to_rgb(img) if img.mode != "L" else img
         buf = io.BytesIO()
         img.save(buf, format="PNG")
     png_bytes = buf.getvalue()
@@ -164,42 +192,75 @@ def _ocr_tesseract(data: bytes) -> tuple[str, str]:
     text = proc.stdout.decode("utf-8", errors="replace")
     text = "\n".join(line.rstrip() for line in text.splitlines()).strip()
     body = text or "_(no text detected in image)_"
-    return body, "tesseract"
+    return body, "tesseract", {}
 
 
 # ---------------------------------------------------------------------------
-# Gemini (multimodal, optional — matches backend strategy)
+# Gemini (multimodal, optional) — ported from the askturing backend
+#   app/services/image/processing_service.py: two structured passes (OCR +
+#   visual analysis) combined into one searchable block. Prompts and schemas
+#   are kept identical so images parse the same here as in the backend.
 # ---------------------------------------------------------------------------
 
-_GEMINI_PROMPT = (
-    "Transcribe ALL text visible in this image verbatim (OCR), preserving "
-    "reading order and any table structure as GitHub-flavored markdown "
-    "tables. After the transcription, add a short '## Description' section "
-    "describing non-text visual content (charts, diagrams, photos) in one "
-    "or two sentences. If the image contains no text, output only the "
-    "description. Do not add commentary or apologies."
+# Prompts from the backend (OCR_PROMPT / VISUAL_PROMPT), kept textually
+# identical — written as adjacent string literals only to satisfy the line
+# length limit (no newlines inserted mid-sentence).
+_OCR_PROMPT = (
+    "Analyze this image and extract all text content.\n"
+    "\n"
+    "If the image contains readable text (printed or handwritten), extract it "
+    "completely in proper reading order, preserving the logical structure and flow.\n"
+    "\n"
+    "If the image does not contain meaningful text (e.g., it's a photo, artwork, "
+    "diagram without text, or the text is completely illegible), indicate that no "
+    "meaningful text is present.\n"
+    "\n"
+    "For screenshots, extract all visible text including UI elements, labels, and content.\n"
+    "For documents, preserve paragraph structure and headings.\n"
+    "For handwritten notes, do your best to transcribe legibly written text."
+)
+
+_VISUAL_PROMPT = (
+    "Analyze this image and provide a detailed visual description for search "
+    "and retrieval.\n"
+    "\n"
+    "1. Provide a comprehensive visual summary (3-5 sentences) describing the "
+    "content, context, and purpose of the image. Include:\n"
+    "   - What the image shows and depicts\n"
+    "   - The setting, environment, or context\n"
+    "   - Key activities, actions, or interactions if present\n"
+    "   - The mood, style, or presentation (e.g., professional, casual, "
+    "technical, artistic)\n"
+    "\n"
+    "2. List all significant objects, people, colors, text elements, UI "
+    "components, and visual elements you can identify. Be thorough.\n"
+    "\n"
+    "3. Identify the specific type of scene or content (e.g., business document, "
+    "product photo, user interface screenshot, data visualization, architectural "
+    "diagram, landscape photo, technical schematic, presentation slide, etc.).\n"
+    "\n"
+    "Be descriptive and specific. The goal is to capture enough detail so that "
+    "someone searching for this image using text queries will be able to find it."
 )
 
 
 def _normalize_for_gemini(data: bytes) -> tuple[bytes, str]:
     """Normalize an image for the Gemini API. Returns (bytes, mime_type).
 
-    Mirrors backend/preprocessing.py: Gemini accepts PNG/JPEG/WebP/HEIC but
-    not TIFF/GIF, so those are re-encoded to JPEG. Oversized images are
-    JPEG-compressed (then scaled) under the 5 MB ceiling. RGB conversion
-    handles alpha/palette modes.
+    Mirrors the backend's `normalize_image_format` (TIFF/GIF → JPEG, since
+    Gemini doesn't accept them) plus our own size ceiling: oversized PNG/JPEG/
+    WebP are re-encoded — progressively lower JPEG quality, then scaled — under
+    `image_max_bytes`. Transparency is composited onto white via `_to_rgb`.
     """
     from PIL import Image
 
     with Image.open(io.BytesIO(data)) as img:
         fmt = (img.format or "").upper()
-        # Formats Gemini ingests natively and that are already small enough
-        # pass through untouched.
-        if fmt in ("PNG", "JPEG", "WEBP") and len(data) <= settings.image_max_bytes:
-            mime = {"PNG": "image/png", "JPEG": "image/jpeg", "WEBP": "image/webp"}[fmt]
-            return data, mime
+        # Native + already small enough → pass through untouched.
+        if fmt in _GEMINI_NATIVE and len(data) <= settings.image_max_bytes:
+            return data, _GEMINI_NATIVE[fmt]
 
-        rgb = img.convert("RGB") if img.mode not in ("RGB",) else img
+        rgb = _to_rgb(img)
         for quality in (85, 70, 50):
             buf = io.BytesIO()
             rgb.save(buf, format="JPEG", quality=quality)
@@ -217,28 +278,118 @@ def _normalize_for_gemini(data: bytes) -> tuple[bytes, str]:
             resized.save(buf, format="JPEG", quality=70)
             if buf.tell() <= settings.image_max_bytes:
                 return buf.getvalue(), "image/jpeg"
-        # Give up shrinking; send the smallest JPEG we produced.
         return buf.getvalue(), "image/jpeg"
 
 
-def _ocr_gemini(data: bytes) -> tuple[str, str]:
-    """Multimodal OCR + description via Gemini. Requires the `gemini` extra."""
+def _token_usage(response) -> dict:
+    """Extract Gemini token counts for cost tracking (backend's
+    `_extract_token_usage`). Returns zeros if unavailable."""
+    try:
+        usage = getattr(response, "usage_metadata", None)
+        if usage:
+            inp = getattr(usage, "prompt_token_count", 0) or 0
+            out = getattr(usage, "candidates_token_count", 0) or 0
+            return {
+                "input_tokens": inp,
+                "output_tokens": out,
+                "total_tokens": getattr(usage, "total_token_count", 0) or (inp + out),
+            }
+    except Exception:
+        log.debug("token usage extraction failed", exc_info=True)
+    return {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+
+
+def _combine(ocr, visual) -> str:
+    """Combine OCR + visual analysis into one searchable markdown block,
+    mirroring the backend's `ImageProcessingResult.get_searchable_text`:
+    visual summary, then detected elements, scene type, then the OCR text."""
+    parts: list[str] = []
+    if visual is not None:
+        if visual.summary:
+            parts.append(visual.summary)
+        if visual.detected_objects:
+            parts.append("**Visual elements:** " + ", ".join(visual.detected_objects))
+        if visual.scene_type:
+            parts.append(f"**Type:** {visual.scene_type}")
+    if ocr.has_meaningful_text and ocr.extracted_text:
+        parts.append(f"## Extracted text\n\n{ocr.extracted_text}")
+    return "\n\n".join(parts).strip()
+
+
+def _ocr_gemini(data: bytes) -> tuple[str, str, dict]:
+    """OCR + visual analysis via Gemini — the backend's pipeline.
+
+    Two structured calls (OCR, then visual analysis unless disabled), combined
+    into one searchable block. Returns (body, engine_label, fields) where
+    `fields` carries has_meaningful_text / document_type / scene_type /
+    detected_objects / confidence and summed token usage.
+    """
     if not settings.gemini_api_key:
         raise RuntimeError("image_ocr_engine='gemini' but PARSER_GEMINI_API_KEY is unset")
     try:
         from google import genai
         from google.genai import types
+        from pydantic import BaseModel, Field
     except ImportError as exc:  # pragma: no cover - depends on optional extra
         raise RuntimeError("google-genai not installed — run `uv sync --extra gemini`") from exc
 
+    # Structured-output schemas, identical to the backend's.
+    class _OCRResult(BaseModel):
+        has_meaningful_text: bool
+        document_type: str | None = None
+        extracted_text: str | None = None
+        confidence: str = "low"
+
+    class _VisualResult(BaseModel):
+        summary: str = ""
+        detected_objects: list[str] = Field(default_factory=list)
+        scene_type: str | None = None
+
     img_bytes, mime = _normalize_for_gemini(data)
     client = genai.Client(api_key=settings.gemini_api_key)
-    response = client.models.generate_content(
-        model=settings.gemini_model,
-        contents=[
-            types.Part.from_bytes(data=img_bytes, mime_type=mime),
-            _GEMINI_PROMPT,
-        ],
-    )
-    body = (response.text or "").strip() or "_(no content extracted)_"
-    return body, f"gemini-{settings.gemini_model}"
+
+    def _call(prompt: str, schema):
+        resp = client.models.generate_content(
+            model=settings.gemini_model,
+            contents=[
+                types.Content(
+                    role="user",
+                    parts=[
+                        types.Part.from_text(text=prompt),
+                        types.Part.from_bytes(data=img_bytes, mime_type=mime),
+                    ],
+                )
+            ],
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                response_schema=schema,
+            ),
+        )
+        text = resp.text
+        if text:
+            parsed = schema.model_validate_json(text)
+        elif schema is _OCRResult:
+            parsed = schema(has_meaningful_text=False)  # required field; no JSON came back
+        else:
+            parsed = schema()
+        return parsed, _token_usage(resp)
+
+    ocr, ocr_tok = _call(_OCR_PROMPT, _OCRResult)
+    visual = None
+    vis_tok = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+    if settings.image_visual_analysis:
+        visual, vis_tok = _call(_VISUAL_PROMPT, _VisualResult)
+
+    body = _combine(ocr, visual) or "_(no content extracted)_"
+    fields = {
+        "has_meaningful_text": ocr.has_meaningful_text,
+        "document_type": ocr.document_type,
+        "confidence": ocr.confidence,
+        "input_tokens": ocr_tok["input_tokens"] + vis_tok["input_tokens"],
+        "output_tokens": ocr_tok["output_tokens"] + vis_tok["output_tokens"],
+        "total_tokens": ocr_tok["total_tokens"] + vis_tok["total_tokens"],
+    }
+    if visual is not None:
+        fields["scene_type"] = visual.scene_type
+        fields["detected_objects"] = visual.detected_objects
+    return body, f"gemini-{settings.gemini_model}", fields

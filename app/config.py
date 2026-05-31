@@ -172,6 +172,11 @@ class Settings(BaseSettings):
     # Backend uses gemini-2.5-flash for image OCR + visual analysis.
     gemini_api_key: str | None = None
     gemini_model: str = "gemini-2.5-flash"
+    # Backend parity: the Gemini engine runs OCR *and* a visual-analysis pass
+    # (summary, detected objects, scene type) and combines them into one
+    # searchable block. Disable the visual pass for OCR-only (halves the
+    # Gemini calls/cost per image). Matches the backend's skip_visual.
+    image_visual_analysis: bool = True
     # Image preprocessing for the Gemini path (from backend/preprocessing.py).
     image_max_bytes: int = 5 * 1024 * 1024  # 5 MB Gemini/embedding ceiling
     image_min_dimension: int = 56

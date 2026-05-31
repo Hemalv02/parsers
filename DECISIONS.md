@@ -312,6 +312,31 @@ for image OCR *and* visual analysis (charts/diagrams/photos), which classic
 OCR can't describe. We keep it optional so the service runs with zero keys
 by default, and matches the backend when configured.
 
+**Gemini path is ported verbatim from the backend** (`processing_service.py`),
+not a thinner reimplementation, so an image parses the same here as there:
+- **Two structured calls** — an OCR pass (`_OCRResult`: has_meaningful_text /
+  document_type / extracted_text / confidence) and a visual-analysis pass
+  (`_VisualAnalysisResult`: summary / detected_objects / scene_type), both
+  using `response_mime_type=application/json` + a pydantic `response_schema`.
+  The same `OCR_PROMPT` / `VISUAL_PROMPT` text is used.
+- **Combined** into one searchable block by `_combine` (mirrors the backend's
+  `get_searchable_text`: summary → visual elements → type → extracted text),
+  which is what gets embedded.
+- **Token usage** (input/output/total) is summed across both calls and
+  surfaced in `stats.gemini_tokens` for cost tracking.
+- `document_type` / `scene_type` are promoted into the normalized `metadata`;
+  the richer fields appear in `structured`.
+- **White-background RGB compositing** (`_to_rgb`, the backend's
+  `_convert_to_rgb`) replaces a plain `convert("RGB")` everywhere (tesseract
+  and Gemini), so alpha/palette transparency no longer turns black and wreck
+  OCR. TIFF/GIF → JPEG normalization (Gemini can't take them) is retained.
+- The visual pass is toggleable (`PARSER_IMAGE_VISUAL_ANALYSIS`, the backend's
+  `skip_visual`) for OCR-only at half the calls/cost.
+
+We use the **synchronous** Gemini client (the parser runs in the SIGKILL
+worker / threadpool), where the backend uses the async `aio` client on its
+event loop — same calls, different client flavor to fit our process model.
+
 **Alternatives.**
 - *EasyOCR / PaddleOCR.* Heavy model downloads, GPU-leaning. Rejected for a
   default; tesseract is light and ubiquitous.
