@@ -59,6 +59,32 @@ def _ods_bytes() -> bytes:
     return buf.getvalue()
 
 
+def _odp_bytes() -> bytes:
+    from odf.draw import Frame, Page, TextBox
+    from odf.opendocument import OpenDocumentPresentation
+    from odf.style import MasterPage, PageLayout, PageLayoutProperties
+    from odf.text import P
+
+    doc = OpenDocumentPresentation()
+    layout = PageLayout(name="pl1")
+    layout.addElement(PageLayoutProperties(pagewidth="25.4cm", pageheight="19.05cm"))
+    doc.automaticstyles.addElement(layout)
+    master = MasterPage(name="Default", pagelayoutname=layout)
+    doc.masterstyles.addElement(master)
+
+    page = Page(masterpagename=master)
+    frame = Frame(width="20cm", height="5cm", x="2cm", y="2cm")
+    box = TextBox()
+    box.addElement(P(text="Impress Slide Title"))
+    box.addElement(P(text="A bullet from a LibreOffice Impress presentation."))
+    frame.addElement(box)
+    page.addElement(frame)
+    doc.presentation.addElement(page)
+    buf = io.BytesIO()
+    doc.save(buf)
+    return buf.getvalue()
+
+
 def test_formats_lists_odf(client):
     supported = client.get("/formats").json()["supported"]
     for ext in (".odt", ".ods", ".odp"):
@@ -78,6 +104,13 @@ def test_ods_roundtrips(client):
     assert body["parser"] == "markitdown-xlsx"
     assert "North" in body["markdown"]
     assert "42" in body["markdown"]
+
+
+def test_odp_roundtrips(client):
+    # LibreOffice Impress: soffice -> .pptx -> markitdown-pptx.
+    body = _post(client, "deck.odp", _odp_bytes())
+    assert body["parser"] == "markitdown-pptx"
+    assert "Impress Slide Title" in body["markdown"]
 
 
 def test_odt_metadata_survives_roundtrip(client):
