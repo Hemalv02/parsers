@@ -491,6 +491,43 @@ the RAG-metadata use case doesn't need.
 **OOXML XML is parsed with the §13 XXE-safe parser** — `core.xml` is attacker-
 controlled, so the same hardened lxml parser (no entity/network/DTD) is reused.
 
+## 15. Concurrency ceiling for heavy converters (per worker)
+
+**Context.** `convert()` runs the blocking `dispatch()` via
+`run_in_threadpool` so one uvicorn worker doesn't stall its event loop (see
+§3). But the threadpool (anyio's default ~40 tokens) put no ceiling on how many
+heavy parses run at once: an inbound burst could fan out to dozens of
+simultaneous `soffice` / `python -m app.worker` subprocesses, and with N
+uvicorn workers that multiplies to N×40. The only backstop was the container
+`mem_limit`, which OOM-kills the offender rather than applying back-pressure.
+
+**Decision.** An `asyncio.Semaphore(max_concurrent_heavy_parses)` (default 4)
+gates the **heavy** path only — legacy soffice round-trips and isolated-worker
+formats (pdf/office/csv/email/image). Requests past the limit await the
+semaphore (queue) instead of spawning another subprocess. Light in-process
+formats (text/json/html/rtf/docx) acquire a `nullcontext` and run ungated, so a
+quick `.txt`/`.json` is never stuck behind a soffice burst. `_is_heavy(ext)`
+decides from the registry (LEGACY membership or `parser.isolation`).
+
+**Why per-process (not global).** The semaphore lives in each worker's event
+loop; effective cluster concurrency is `UVICORN_WORKERS × max_concurrent_heavy_parses`.
+A cross-process ceiling would need shared state (Redis/a file lock) — overkill
+for a service whose deployment already fixes the worker count. Operators size
+the two knobs together against `PARSER_MEM_LIMIT` and per-file peak RSS.
+
+**Why gate only heavy work.** The whole point of §3's threadpool move was
+concurrent service from one worker; gating *everything* at 4 would needlessly
+serialize trivial requests. The risk being bounded is subprocess/​memory
+fan-out, which is exactly the legacy + isolated set.
+
+**Alternatives.**
+- *Bound all dispatches with one semaphore* — simpler, but throttles light
+  requests for no memory benefit; rejected.
+- *Lower the anyio threadpool limiter* — blunt (affects every `run_in_threadpool`
+  in the process, not just parses) and not format-aware; rejected.
+- *A process pool / external queue (Celery/arq)* — the real answer at scale
+  (already deferred in §3); the semaphore gives back-pressure without the infra.
+
 ## Validation against a real corpus
 
 Sampled the `bulk data` Google Drive corpus (~4,600 files) via

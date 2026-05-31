@@ -88,6 +88,17 @@ class Settings(BaseSettings):
     detect_language: bool = True
     language_sample_chars: int = 2000
 
+    # --- Concurrency ceiling (per uvicorn worker process) ------------------
+    # Max HEAVY parses running at once in one worker: legacy soffice
+    # round-trips + isolated-worker formats (pdf/office/csv/email/image), each
+    # of which spawns a memory-hungry subprocess. Without this, FastAPI's
+    # threadpool lets an inbound burst fan out to dozens of simultaneous
+    # soffice / `python -m app.worker` processes and OOM the host; excess
+    # requests instead queue (back-pressure). Light in-process formats
+    # (text/json/html/rtf/docx) are NOT gated. Effective cluster concurrency =
+    # UVICORN_WORKERS x this — size against PARSER_MEM_LIMIT and per-file peak.
+    max_concurrent_heavy_parses: int = 4
+
     # --- Subprocess / converter timeouts (seconds) -------------------------
     # markitdown (pptx/xlsx), csv, pdf, email, and image all run in the
     # isolated worker subprocess the API can SIGKILL on timeout. 60s matched
