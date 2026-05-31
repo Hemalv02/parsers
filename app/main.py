@@ -26,8 +26,9 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
 
 from .config import settings
-from .exceptions import UnsupportedFile
+from .exceptions import DecompressionBombError, MaliciousFileError, UnsupportedFile
 from .parsers import ALL_SUPPORTED, LEGACY, get_parser
+from .security import assert_zip_safe, scan_file
 
 # The worker runs as a module so it resolves package-relative imports
 # regardless of install location.
@@ -99,7 +100,15 @@ def run_isolated(path: Path, mode: str) -> dict:
 
 def dispatch(path: Path, tmpdir: Path, mode: str) -> dict:
     """Route a file to its parser and return {parser, markdown, structured,
-    stats}. Legacy Office formats are converted via soffice first."""
+    stats}. Legacy Office formats are converted via soffice first.
+
+    Security guards run first, in this parent process, before any parser (or
+    the soffice round-trip, or the SIGKILL worker) opens the file: an optional
+    malware scan, then a decompression-bomb check on ZIP-container uploads.
+    """
+    scan_file(path)  # no-op unless PARSER_SCAN_COMMAND is configured
+    assert_zip_safe(path)  # no-op for non-zip inputs
+
     ext = path.suffix.lower()
 
     if ext in LEGACY:
@@ -197,6 +206,12 @@ async def convert(
             raise
         except UnsupportedFile as exc:
             raise HTTPException(415, str(exc)) from None
+        except DecompressionBombError as exc:
+            log.warning("decompression bomb rejected: %s", exc)
+            raise HTTPException(413, f"decompression_bomb: {exc}") from None
+        except MaliciousFileError as exc:
+            log.warning("upload rejected by malware scanner: %s", exc)
+            raise HTTPException(422, f"malicious_file: {exc}") from None
         except subprocess.TimeoutExpired:
             raise HTTPException(504, "converter timed out") from None
         except Exception as exc:

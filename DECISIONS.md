@@ -382,6 +382,61 @@ text specifically signals a scanned source worth re-routing.
 
 ---
 
+## 13. Security hardening for untrusted uploads (zip-bomb, XXE, AV hook)
+
+**Context.** The service parses arbitrary uploaded files, so every parser is
+an untrusted-input surface. Three concrete exposures were closed.
+
+**Decision — single dispatch chokepoint.** The guards live in `app/security.py`
+and run at the top of `dispatch()` (`main.py`), in the parent process, *before*
+any parser opens the file — whether it runs in-process (docx) or in the
+SIGKILL-able worker (xlsx/pptx), and before the soffice round-trip for legacy
+formats. The worker is only ever spawned from `dispatch`, so one check covers
+both execution paths without duplication.
+
+1. **Decompression bombs (`assert_zip_safe`).** `.docx/.xlsx/.pptx` are ZIP
+   containers; `max_file_mb` caps only the *compressed* upload, so a small
+   archive can expand to gigabytes. The DOCX hybrid path (`hybrid.preprocess`)
+   reads every entry into memory **in-process**, so a bomb there OOMs the
+   uvicorn worker, not the contained child. The guard inspects only the
+   central directory (no extraction) and refuses (HTTP 413) on any of: total
+   uncompressed bytes (`zipbomb_max_uncompressed_mb`, default 1 GB), entry
+   count (`zipbomb_max_entries`, 10k), or per-entry compression ratio
+   (`zipbomb_max_ratio`, 200×) for entries over 1 MiB. The 1 MiB ratio floor
+   stops small, highly-compressible boilerplate (`[Content_Types].xml`) from
+   false-triggering.
+
+2. **XXE / entity expansion (`hybrid.py`).** The one untrusted-bytes XML parse
+   we own is `ET.fromstring` on DOCX OOXML parts. lxml's default parser has
+   `resolve_entities=True` → billion-laughs and `SYSTEM "file://…"` disclosure.
+   We parse those parts with a hardened `_XXE_SAFE_PARSER`
+   (`resolve_entities=False, no_network=True, load_dtd=False, huge_tree=False`).
+   OOXML uses no custom entities, so valid documents are unaffected. (The
+   vendored `omml.py` `load*` helpers also parse, but they are not on our code
+   path — `hybrid` calls `oMath2Latex` on elements already parsed by the
+   hardened parser — so the verbatim vendor file is left untouched.)
+
+3. **Malware scanning (`scan_file`).** Optional, off by default: when
+   `PARSER_SCAN_COMMAND` is set (e.g. `clamdscan --no-summary --fdpass`), every
+   upload is scanned before parsing; a non-zero exit rejects it (HTTP 422). It
+   **fails closed** — a configured-but-missing scanner binary is a 500, never a
+   silent unscanned pass.
+
+**soffice macros.** Headless `--convert-to` does not execute document macros,
+and the throwaway profile starts from "High" macro security, so there is no
+CLI macro-hardening to add. The residual is external/linked content fetches,
+mitigated by the AV scan (pre-soffice) and deployment-layer egress limits.
+
+**Alternatives.**
+- *Guard inside each OOXML parser* — rejected: would duplicate the check across
+  in-process and worker paths and miss the soffice output; the dispatch
+  chokepoint is one place that dominates both.
+- *Bundle ClamAV / a Python AV lib* — rejected: heavy and opinionated for a
+  light service. An optional external-command hook is dependency-free and lets
+  each deployment choose its scanner (or none).
+- *`defusedxml`* — its lxml support is deprecated/limited; configuring lxml's
+  own `XMLParser` flags is the supported, dependency-free hardening.
+
 ## Validation against a real corpus
 
 Sampled the `bulk data` Google Drive corpus (~4,600 files) via

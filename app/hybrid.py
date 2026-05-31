@@ -46,6 +46,20 @@ M_NS = NS["m"]
 
 MATH_PARTS = ("word/document.xml", "word/footnotes.xml", "word/endnotes.xml")
 
+# Hardened parser for the untrusted DOCX XML parts. lxml's default parser has
+# `resolve_entities=True`, which exposes two classic attacks on a hostile
+# .docx: billion-laughs entity expansion (OOM) and local-file disclosure via
+# `<!ENTITY x SYSTEM "file:///etc/passwd">`. We turn entity resolution off and
+# block network/DTD loading. OOXML uses no custom entities, so well-formed
+# documents are unaffected (predefined XML entities like &amp; still
+# round-trip through ET.tostring). See DECISIONS.md §13.
+_XXE_SAFE_PARSER = ET.XMLParser(
+    resolve_entities=False,
+    no_network=True,
+    load_dtd=False,
+    huge_tree=False,
+)
+
 # Sentinels: pure alphanumeric, leading/trailing X to avoid swallowing
 # adjacent digits when pandoc word-wraps. 6 digits → up to 1M equations.
 SENTINEL_INLINE_PREFIX = "XHYBRIDINLINE"
@@ -80,7 +94,7 @@ def _replace_math_with_sentinels(
 ) -> bytes:
     """Replace OMML in this part with text sentinels; record LaTeX into lists."""
     try:
-        root = ET.fromstring(xml_bytes)
+        root = ET.fromstring(xml_bytes, _XXE_SAFE_PARSER)
     except ET.XMLSyntaxError:
         return xml_bytes
 

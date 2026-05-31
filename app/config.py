@@ -31,6 +31,26 @@ class Settings(BaseSettings):
     # giant file can't fill the disk or OOM a worker. 0 disables the cap.
     max_file_mb: int = 100
 
+    # --- Security: decompression-bomb guard (OOXML zips) -------------------
+    # .docx/.xlsx/.pptx are ZIP containers; the upload cap above bounds only
+    # the COMPRESSED bytes, so a small archive can still expand to gigabytes
+    # in memory. `app/security.py` inspects the central directory at dispatch
+    # and refuses an archive that breaches any of these (HTTP 413). Generous
+    # defaults: real OOXML XML compresses ~10-20x and a whole document rarely
+    # exceeds tens of MB uncompressed, so legitimate files clear them easily.
+    zipbomb_max_uncompressed_mb: int = 1024  # total uncompressed across entries
+    zipbomb_max_entries: int = 10_000  # entry count
+    zipbomb_max_ratio: int = 200  # per-entry compress ratio (entries > 1 MiB)
+
+    # --- Security: optional external malware-scan hook ---------------------
+    # Shell-style command run on every upload before parsing (and before the
+    # soffice round-trip for legacy formats). The file path is appended as the
+    # final argument; a non-zero exit rejects the file (HTTP 422). Unset by
+    # default — no AV dependency is bundled. Example:
+    #   PARSER_SCAN_COMMAND="clamdscan --no-summary --fdpass"
+    scan_command: str | None = None
+    scan_timeout_s: int = 60
+
     # --- MIME verification (front-door guard) ------------------------------
     # When true, sniff the uploaded bytes with libmagic and, for the few
     # UNAMBIGUOUS binary families (PDF, images), re-route by content when the

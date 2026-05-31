@@ -20,6 +20,16 @@ Server-hardening over a naive `soffice --convert-to` call:
     soffice hangs at startup (it talks to itself over a unix socket even for
     `--convert-to`). If a socket shim is set in the environment we pass it
     through unchanged. See DECISIONS.md §7.
+
+Security posture (DECISIONS.md §13). Headless `--convert-to` does NOT fire
+document macros (no AutoOpen/event handlers run during conversion), and the
+throwaway per-call profile starts from LibreOffice's default ("High") macro
+security, so there is no macro-execution path to harden via the CLI. The
+residual risk is *external/linked content* — linked images, spreadsheet
+external data / DDE — which a conversion can try to fetch. The container has
+no outbound credentials and the optional `PARSER_SCAN_COMMAND` (see
+`app/security.py`) scans the upload before it ever reaches soffice; network
+egress should additionally be restricted at the deployment layer.
 """
 
 from __future__ import annotations
