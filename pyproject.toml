@@ -5,6 +5,8 @@ description = "Multi-format document -> markdown parser service for RAG ingestio
 authors = [
     { name = "Hemalv02", email = "mominulislam-2021411216@cs.du.ac.bd" }
 ]
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
 requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.115",

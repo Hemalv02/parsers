@@ -1,0 +1,16 @@
+parser-service
+Copyright 2026 Mominul Islam Hemal
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+This product includes software vendored from third parties:
+
+- app/vendor/omml/ (omml.py, latex_dict.py): an OMML -> LaTeX converter,
+  vendored from the docling project (https://github.com/DS4SD/docling),
+  which adapted it from xiilei/dwml (https://github.com/xiilei/dwml).
+  Licensed under the MIT License. The original notice is retained in
+  app/vendor/omml/LICENSE.
