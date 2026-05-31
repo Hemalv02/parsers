@@ -26,6 +26,11 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
+    # --- Upload limit ------------------------------------------------------
+    # Reject uploads larger than this (HTTP 413) while streaming to disk, so a
+    # giant file can't fill the disk or OOM a worker. 0 disables the cap.
+    max_file_mb: int = 100
+
     # --- MIME verification (front-door guard) ------------------------------
     # When true, sniff the uploaded bytes with libmagic and, for the few
     # UNAMBIGUOUS binary families (PDF, images), re-route by content when the

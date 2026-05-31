@@ -22,6 +22,7 @@ import tempfile
 from pathlib import Path
 
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
 
 from .config import settings
@@ -159,12 +160,19 @@ async def convert(
     if mode not in VALID_MODES:
         raise HTTPException(400, f"invalid mode: {mode}. Use one of {VALID_MODES}")
 
+    max_bytes = settings.max_file_mb * 1024 * 1024
     with tempfile.TemporaryDirectory() as tmp:
         tmpdir = Path(tmp)
         src = tmpdir / Path(file.filename).name
-        # Stream to disk in chunks to avoid loading huge files into memory.
+        # Stream to disk in chunks to avoid loading huge files into memory,
+        # rejecting (413) as soon as the running total exceeds the cap so a
+        # giant upload can't fill the disk.
+        written = 0
         with src.open("wb") as f:
             while chunk := await file.read(1 << 20):
+                written += len(chunk)
+                if max_bytes and written > max_bytes:
+                    raise HTTPException(413, f"file exceeds {settings.max_file_mb} MB limit")
                 f.write(chunk)
 
         if settings.verify_mime:
@@ -181,7 +189,10 @@ async def convert(
         src_bytes = src.stat().st_size
         log.info("converting %s (%s bytes, mode=%s)", file.filename, src_bytes, mode)
         try:
-            result = dispatch(src, tmpdir, mode)
+            # dispatch() is blocking (soffice / worker subprocess.run); run it
+            # in a threadpool so a single uvicorn worker can serve concurrent
+            # requests instead of stalling the event loop.
+            result = await run_in_threadpool(dispatch, src, tmpdir, mode)
         except HTTPException:
             raise
         except UnsupportedFile as exc:

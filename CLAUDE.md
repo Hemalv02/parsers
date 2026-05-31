@@ -87,8 +87,13 @@ uv run ruff check app tests scripts    # must be clean
 
 ## Known issues / next
 
-- `convert()` is `async def` but calls the blocking `dispatch()` directly →
-  ties up the event loop. Mitigated in `docker-compose.yml` with multiple uvicorn
-  workers; the proper fix is `await run_in_threadpool(dispatch, ...)`.
 - Optional scanned-PDF OCR fallback (`pypdfium2` render → existing image engine)
-  is designed but not implemented.
+  is designed but not implemented — scanned/broken PDFs return `422 needs_ocr`.
+- `mypy` is configured but not wired into any check (pre-commit/CI); no CI yet.
+- `pre-commit` is configured but not installed as a git hook (`pre-commit install`);
+  the PostToolUse hook covers in-session edits only.
+
+Recently closed: `convert()` now runs `dispatch()` via `run_in_threadpool` (no
+event-loop blocking); upload size cap (`PARSER_MAX_FILE_MB`, 413); CSV structured
+mode has the same pandas→stdlib fallback as markdown; docx/html/rtf fall back to
+markitdown/striprtf if pandoc fails.
