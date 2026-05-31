@@ -36,12 +36,17 @@ def _parse_one(file_arg: str, mode: str) -> int:
             print(f"error: {type(exc).__name__}: {exc}", file=sys.stderr)
             return 1
 
+    from .metadata import augment as augment_metadata
+
     out: dict = {
         "parser": result["parser"],
         "mode": mode,
         "filename": src.name,
         "bytes": src.stat().st_size,
         "stats": result.get("stats", {}),
+        "metadata": augment_metadata(
+            result.get("metadata", {}), result.get("markdown", ""), src.name
+        ),
     }
     if mode in ("markdown", "both"):
         out["markdown"] = result["markdown"]

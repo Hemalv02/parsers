@@ -27,7 +27,16 @@ class CsvParser(BaseParser):
     def parse(self, path: Path, mode: str) -> ParseResult:
         md, used = self._to_markdown(path)
         structured = self._structured(path) if self.wants_structured(mode) else None
-        return ParseResult(parser=used, markdown=md, structured=structured)
+        # Row/column counts come from the structured pass, so they're present
+        # in structured/both modes (computing them in markdown mode would mean
+        # parsing the file twice).
+        metadata: dict = {}
+        if structured:
+            metadata = {
+                "column_count": len(structured.get("columns", [])),
+                "row_count": len(structured.get("rows", [])),
+            }
+        return ParseResult(parser=used, markdown=md, structured=structured, metadata=metadata)
 
     def _to_markdown(self, path: Path) -> tuple[str, str]:
         import pandas as pd

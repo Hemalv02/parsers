@@ -14,7 +14,7 @@ in the shared registry — identical routing to the API — and runs it.
 I/O contract:
     argv:   <path> <mode>
     stdout: one JSON line:
-              {"ok": true, "parser", "markdown", "structured", "stats"}
+              {"ok": true, "parser", "markdown", "structured", "stats", "metadata"}
               {"ok": false, "error", ["error_kind"], ["traceback"]}
     exit:   0 unless the helper itself crashes; the caller relies on JSON.
 
@@ -65,6 +65,7 @@ def main() -> int:
                     "markdown": result.markdown,
                     "structured": result.structured,
                     "stats": result.stats,
+                    "metadata": result.metadata,
                 }
             )
         )

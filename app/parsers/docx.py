@@ -16,6 +16,7 @@ import logging
 from pathlib import Path
 
 from .. import hybrid
+from ..metadata import ooxml_core_props
 from .base import BaseParser, ParseResult
 from .markitdown_util import convert_with_markitdown
 
@@ -38,4 +39,7 @@ class DocxParser(BaseParser):
             stats = {}
             parser = "markitdown-docx"
         structured = {"markdown": md} if self.wants_structured(mode) else None
-        return ParseResult(parser=parser, markdown=md, structured=structured, stats=stats)
+        metadata = ooxml_core_props(path)
+        return ParseResult(
+            parser=parser, markdown=md, structured=structured, stats=stats, metadata=metadata
+        )

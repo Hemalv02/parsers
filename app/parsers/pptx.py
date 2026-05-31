@@ -11,6 +11,7 @@ from pathlib import Path
 
 from markitdown.converters import PptxConverter
 
+from ..metadata import ooxml_core_props, pptx_slide_count
 from .base import BaseParser, ParseResult
 from .markitdown_util import convert_with_markitdown
 
@@ -23,7 +24,11 @@ class PptxParser(BaseParser):
     def parse(self, path: Path, mode: str) -> ParseResult:
         md = convert_with_markitdown(PptxConverter, ".pptx", path)
         structured = self._structured(path) if self.wants_structured(mode) else None
-        return ParseResult(parser=self.name, markdown=md, structured=structured)
+        metadata = ooxml_core_props(path)
+        slides = pptx_slide_count(path)
+        if slides is not None:
+            metadata["slide_count"] = slides
+        return ParseResult(parser=self.name, markdown=md, structured=structured, metadata=metadata)
 
     def _structured(self, path: Path) -> dict:
         from pptx import Presentation

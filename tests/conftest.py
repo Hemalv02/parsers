@@ -28,6 +28,8 @@ def docx_bytes() -> bytes:
     import docx
 
     d = docx.Document()
+    d.core_properties.title = "Quarterly Report"
+    d.core_properties.author = "Finance Team"
     d.add_heading("Quarterly Report", level=1)
     d.add_paragraph("Revenue grew this quarter.")
     table = d.add_table(rows=2, cols=2)
@@ -45,6 +47,7 @@ def pptx_bytes() -> bytes:
     from pptx import Presentation
 
     prs = Presentation()
+    prs.core_properties.title = "Deck Title"
     slide = prs.slides.add_slide(prs.slide_layouts[1])
     slide.shapes.title.text = "Deck Title"
     slide.placeholders[1].text = "First bullet point about parsing"
@@ -97,6 +100,8 @@ def pdf_bytes() -> bytes:
     from fpdf import FPDF
 
     pdf = FPDF()
+    pdf.set_title("Annual Summary")
+    pdf.set_author("Finance Team")
     pdf.add_page()
     pdf.set_font("Helvetica", size=14)
     pdf.cell(0, 10, "Annual Summary")

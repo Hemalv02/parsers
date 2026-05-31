@@ -613,6 +613,15 @@ wheels = [
 ]
 
 [[package]]
+name = "langdetect"
+version = "1.0.9"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "six" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/0e/72/a3add0e4eec4eb9e2569554f7c70f4a3c27712f40e3284d483e88094cc0e/langdetect-1.0.9.tar.gz", hash = "sha256:cbc1fef89f8d062739774bd51eda3da3274006b3661d199c2655f6b3f6d605a0", size = 981474, upload-time = "2021-05-07T07:54:13.562Z" }
+
+[[package]]
 name = "librt"
 version = "0.11.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1028,6 +1037,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "fastapi" },
+    { name = "langdetect" },
     { name = "lxml" },
     { name = "markdownify" },
     { name = "markitdown", extra = ["docx", "pptx", "xlsx"] },
@@ -1065,6 +1075,7 @@ dev = [
 requires-dist = [
     { name = "fastapi", specifier = ">=0.115" },
     { name = "google-genai", marker = "extra == 'gemini'", specifier = ">=1.0" },
+    { name = "langdetect", specifier = ">=1.0.9" },
     { name = "lxml", specifier = ">=5,<6" },
     { name = "markdownify", specifier = ">=0.13" },
     { name = "markitdown", extras = ["docx", "pptx", "xlsx"], specifier = ">=0.1,<0.2" },

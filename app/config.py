@@ -79,6 +79,15 @@ class Settings(BaseSettings):
     # ballooning the JSON response.
     max_rows_per_sheet: int = 10_000
 
+    # --- Metadata ----------------------------------------------------------
+    # Every /convert response carries a normalized `metadata` dict (title,
+    # author, dates, page/slide/sheet counts, language, source filename) for
+    # RAG filtering and citation — see app/metadata.py. Language is detected
+    # from the markdown body with langdetect; disable if you don't want the
+    # per-request cost, or tune how much text it samples.
+    detect_language: bool = True
+    language_sample_chars: int = 2000
+
     # --- Subprocess / converter timeouts (seconds) -------------------------
     # markitdown (pptx/xlsx), csv, pdf, email, and image all run in the
     # isolated worker subprocess the API can SIGKILL on timeout. 60s matched

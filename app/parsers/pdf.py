@@ -22,6 +22,7 @@ from typing import Any
 
 from ..config import settings
 from ..exceptions import EncryptedPdfError, NeedsOcrError
+from ..metadata import clean, parse_pdf_date
 from .base import BaseParser, ParseResult
 
 log = logging.getLogger("parser.pdf")
@@ -411,6 +412,12 @@ def _extract_per_page(input_path: Path) -> tuple[list[str], dict]:
         body_size = _detect_body_font_size(pdf)
         meta = pdf.metadata or {}
         creator = f"{meta.get('Producer', '')} {meta.get('Creator', '')}".strip()
+        doc_props = {
+            "title": (meta.get("Title") or "").strip(),
+            "author": (meta.get("Author") or "").strip(),
+            "created": parse_pdf_date(meta.get("CreationDate")),
+            "modified": parse_pdf_date(meta.get("ModDate")),
+        }
 
         per_page: list[str] = []
         raw_pages: list[str] = []  # pre-clean text, for the font-garbage check
@@ -445,6 +452,7 @@ def _extract_per_page(input_path: Path) -> tuple[list[str], dict]:
         "font_garbage_ratio": _font_garbage_ratio(raw_pages),
         "bytes_per_page": size / max(1, len(per_page)),
         "creator": creator,
+        "doc_props": doc_props,
     }
     return _strip_repeated_running_lines(per_page), info
 
@@ -537,4 +545,5 @@ class PdfParser(BaseParser):
                 ],
                 "page_count": len(per_page),
             }
-        return ParseResult(parser=self.name, markdown=md, structured=structured)
+        metadata = clean({**info.get("doc_props", {}), "page_count": len(per_page)})
+        return ParseResult(parser=self.name, markdown=md, structured=structured, metadata=metadata)

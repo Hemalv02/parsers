@@ -66,8 +66,26 @@ curl -F file=@doc.docx localhost:8000/convert | jq .
 Response (markdown mode):
 ```json
 { "parser": "hybrid", "mode": "markdown", "filename": "doc.docx",
-  "bytes": 67970, "stats": {...}, "markdown": "..." }
+  "bytes": 67970, "stats": {...},
+  "metadata": {"title": "Q3 Report", "author": "Finance", "language": "en",
+               "source": "doc.docx"},
+  "markdown": "..." }
 ```
+
+### Document metadata
+
+Every response carries a normalized `metadata` dict (in all modes) for RAG
+filtering and citation. All fields are optional and appear only when found:
+
+| field | from |
+|---|---|
+| `title`, `author`, `created`, `modified` | PDF info dict · OOXML `docProps/core.xml` · email headers |
+| `page_count` / `slide_count` / `sheet_count` / `message_count` | PDF · PPTX · XLSX · mbox |
+| `sheet_names`, `row_count`, `column_count` | XLSX/CSV — only in `structured`/`both` (avoids a second parse) |
+| `width`, `height`, `image_format` | images |
+| `message_id` | email |
+| `language` | langdetect over the markdown body (ISO 639-1) |
+| `source` | original upload filename |
 
 ### Output modes
 
@@ -126,6 +144,8 @@ app/
   worker.py         generic SIGKILL-able subprocess dispatcher
   soffice.py        LibreOffice legacy-format round-trip
   config.py         pydantic-settings (PARSER_* env)
+  security.py       untrusted-upload guards (zip-bomb, optional AV scan)
+  metadata.py       normalized per-document metadata extraction
   exceptions.py     typed errors -> HTTP codes
   cli.py            `parser-service` entrypoint
   hybrid.py         DOCX hybrid impl (pandoc + OMML→LaTeX)

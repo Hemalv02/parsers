@@ -27,6 +27,7 @@ from fastapi.responses import JSONResponse
 
 from .config import settings
 from .exceptions import DecompressionBombError, MaliciousFileError, UnsupportedFile
+from .metadata import augment as augment_metadata
 from .parsers import ALL_SUPPORTED, LEGACY, get_parser
 from .security import assert_zip_safe, scan_file
 
@@ -129,6 +130,7 @@ def dispatch(path: Path, tmpdir: Path, mode: str) -> dict:
         "markdown": result.markdown,
         "structured": result.structured,
         "stats": result.stats,
+        "metadata": result.metadata,
     }
 
 
@@ -218,14 +220,20 @@ async def convert(
             log.exception("conversion failed")
             raise HTTPException(500, f"conversion failed: {type(exc).__name__}: {exc}") from exc
 
-    # Build the response per mode. parser/filename/bytes/stats are always
-    # present; markdown and/or structured depend on the requested mode.
+    # Build the response per mode. parser/filename/bytes/stats/metadata are
+    # always present; markdown and/or structured depend on the requested mode.
+    # Metadata is augmented with the detected language (from the always-computed
+    # markdown) and the original filename, so it's returned in every mode.
+    metadata = augment_metadata(
+        result.get("metadata", {}), result.get("markdown", ""), file.filename
+    )
     response: dict = {
         "parser": result["parser"],
         "mode": mode,
         "filename": file.filename,
         "bytes": src_bytes,
         "stats": result.get("stats", {}),
+        "metadata": metadata,
     }
     if mode in ("markdown", "both"):
         response["markdown"] = result["markdown"]

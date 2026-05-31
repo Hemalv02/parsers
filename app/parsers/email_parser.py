@@ -18,6 +18,7 @@ from typing import Any
 
 from ..config import settings
 from ..exceptions import MboxValidationError
+from ..metadata import clean
 from .base import BaseParser, ParseResult, normalize_markdown
 
 log = logging.getLogger("parser.email")
@@ -132,6 +133,19 @@ def _email_fields(msg: Any) -> dict:
     return fields
 
 
+def _email_metadata(msg: Any) -> dict:
+    """Normalized metadata from message headers (cheap — no body decode):
+    subject→title, from→author, Date→created, plus Message-ID for citation."""
+    return clean(
+        {
+            "title": _decode_mime_header(msg.get("Subject")),
+            "author": _decode_mime_header(msg.get("From")),
+            "created": msg.get("Date", ""),
+            "message_id": msg.get("Message-ID", ""),
+        }
+    )
+
+
 def _format_email(msg: Any, message_index: int | None = None) -> str:
     """Render one EmailMessage as RAG-friendly markdown (headers block,
     `---`, body, `---`, attachments). `## Message N` prefix when from mbox."""
@@ -183,7 +197,9 @@ class EmlParser(BaseParser):
             msg = email.message_from_binary_file(f, policy=policy.default)
         md = _format_email(msg)
         structured = _email_fields(msg) if self.wants_structured(mode) else None
-        return ParseResult(parser=self.name, markdown=md, structured=structured)
+        return ParseResult(
+            parser=self.name, markdown=md, structured=structured, metadata=_email_metadata(msg)
+        )
 
 
 class MsgParser(BaseParser):
@@ -268,7 +284,8 @@ class MboxParser(BaseParser):
         structured = (
             {"messages": messages, "truncated_after": truncated_after} if want_struct else None
         )
-        return ParseResult(parser=self.name, markdown=md, structured=structured)
+        metadata = {"message_count": len(parts)}
+        return ParseResult(parser=self.name, markdown=md, structured=structured, metadata=metadata)
 
     @staticmethod
     def _validate(path: Path) -> None:

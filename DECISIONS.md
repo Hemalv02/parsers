@@ -437,6 +437,60 @@ mitigated by the AV scan (pre-soffice) and deployment-layer egress limits.
 - *`defusedxml`* — its lxml support is deprecated/limited; configuring lxml's
   own `XMLParser` flags is the supported, dependency-free hardening.
 
+## 14. Document metadata: one normalized dict across all formats
+
+**Context.** A RAG store needs more than text — it filters and cites on
+document properties (title, author, dates), structural counts (pages, slides,
+sheets), language, and provenance. The service previously returned only
+per-parse `stats` (diagnostics) and, in structured mode, format-specific
+fields; none of it was a normalized, always-present metadata surface.
+
+**Decision.** `ParseResult` gains a `metadata: dict` carried in every response
+and every mode. Unlike `structured` (per-format shape), `metadata` uses ONE
+shared key vocabulary (see `app/metadata.py`): `title/author/created/modified`,
+a format-appropriate count (`page_count`/`slide_count`/`sheet_count`/
+`message_count`), `width/height/image_format` for images, `message_id` for
+email, plus `language` and `source` added by the dispatch layer. Every field
+is optional; `clean()` strips empties so the response advertises only what was
+found. Extraction is strictly best-effort — every reader degrades to `{}` and
+never fails a parse.
+
+**Where each field comes from.**
+- PDF: the pdfplumber `metadata` info dict (Title/Author/CreationDate/ModDate;
+  `parse_pdf_date` normalizes `D:YYYYMMDD…` to ISO-ish) + `page_count`.
+- DOCX/PPTX/XLSX: one shared `ooxml_core_props()` reads `docProps/core.xml`
+  (every OOXML package has it). Counts come cheaply from the zip directory
+  (`ppt/slides/slideN.xml`, `xl/worksheets/sheetN.xml`) so they're available
+  in markdown mode without opening python-pptx/openpyxl. `sheet_names` and CSV
+  `row_count`/`column_count` need the full parse, so they appear only in
+  `structured`/`both` (computing them in markdown mode would parse twice).
+- Email: message headers (subject→title, from→author, Date→created, Message-ID).
+- Images: Pillow header (dimensions + format).
+
+**Language** is detected centrally in the API/CLI layer (`augment()`) from the
+always-computed markdown, so langdetect runs in the parent process — not the
+worker subprocess — and works uniformly for in-process and isolated parsers.
+Deterministic (fixed seed), gated by `PARSER_DETECT_LANGUAGE`, and best-effort
+(None on short/undetectable text).
+
+**Why langdetect.** Pure-Python, no native deps, ~1 MB — fits the light/
+MIT-friendly stack rule. Heavier detectors (fastText/lingua/cld3) buy accuracy
+the RAG-metadata use case doesn't need.
+
+**Alternatives.**
+- *Reuse `stats`* — rejected: `stats` is diagnostics (equation counts, etc.),
+  not retrievable metadata; conflating them muddies both.
+- *Only expose metadata in structured mode* — rejected: a markdown-only
+  embedder still wants title/language/source for filtering; cheap fields are
+  always on, expensive ones (`sheet_names`/row counts) gate on the parse cost.
+- *python-docx/openpyxl for OOXML props* — rejected: opening the whole document
+  just for four properties is far more expensive than reading one zip member;
+  `ooxml_core_props` parses only `docProps/core.xml` (with the §13 hardened
+  parser, since it's untrusted XML).
+
+**OOXML XML is parsed with the §13 XXE-safe parser** — `core.xml` is attacker-
+controlled, so the same hardened lxml parser (no entity/network/DTD) is reused.
+
 ## Validation against a real corpus
 
 Sampled the `bulk data` Google Drive corpus (~4,600 files) via
