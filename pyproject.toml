@@ -50,6 +50,7 @@ dev = [
     "fpdf2>=2.7",
     "httpx>=0.27",
     "mypy>=1.13",
+    "odfpy>=1.4.1",
     "pre-commit>=4.6.0",
     "pytest>=8.3",
     "python-docx>=1.1",

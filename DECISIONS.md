@@ -222,14 +222,32 @@ them well; no reason to reinvent.
 
 ---
 
-## 7. Legacy formats (.doc/.ppt/.xls/.pps/.pot/.ppsx): LibreOffice round-trip
+## 7. Non-native Office formats — legacy binary + OpenDocument: LibreOffice round-trip
 
-**Decision.** Convert legacy binary Office formats to OOXML via
-`soffice --headless --convert-to`, then run the normal path.
+**Decision.** Convert to OOXML via `soffice --headless --convert-to`, then run
+the normal native path. Covers legacy binary Office
+(`.doc/.ppt/.xls/.pps/.pot/.ppsx`) **and OpenDocument**
+(`.odt→.docx`, `.ods→.xlsx`, `.odp→.pptx`).
 
 **Why.** No good pure-Python reader for legacy binary Office formats;
 LibreOffice is the de-facto converter. `.ppsx` (slideshow OOXML) is
 round-tripped too because python-pptx rejects its content-type sniff.
+
+**Why ODF through soffice too (not pandoc).** pandoc reads `.odt` but **not**
+`.ods`/`.odp`, so a pandoc path would only cover one of the three and split
+ODF handling across two engines. soffice is LibreOffice's *own* reference
+format, so the ODF→OOXML round-trip is high-fidelity, and — crucially — it
+makes ODF inherit the **exact same** treatment as the OOXML equivalents: the
+hybrid DOCX pipeline (incl. ODF math → OMML → our LaTeX), normalized metadata
+(soffice writes `docProps/core.xml`), and embedded-image OCR (ODF `Pictures/`
+become `word/media/`). A `.odt` and an equivalent `.docx` produce identical
+output. The cost is soffice's 3-5 s cold start per file (already accepted for
+legacy formats; bounded by the §15 concurrency cap).
+
+**Alternatives.** *pandoc for `.odt`* — faster (no soffice cold start) and
+in-process, but covers only `.odt`, bypasses our hybrid/metadata/embedded-OCR
+machinery, and would need a separate ODF `meta.xml` reader. Rejected for
+uniformity; the round-trip reuses everything.
 
 **Server hardening** (`soffice.py`), beyond a naive `--convert-to`:
 - **Per-invocation user profile** (`-env:UserInstallation=file://<tmpdir>/.lo_profile`).
