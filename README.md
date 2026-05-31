@@ -25,6 +25,10 @@ handled the way it is, with alternatives.
 
 `*` legacy binary formats are round-tripped through LibreOffice (`soffice`).
 
+Text inside images embedded in **PPTX/DOCX** can additionally be OCR'd into a
+`## Embedded image text` section — opt-in via `PARSER_OCR_EMBEDDED_IMAGES`
+(off by default; PDFs not yet covered).
+
 ## Requirements
 
 - Python 3.12 + [`uv`](https://docs.astral.sh/uv/)

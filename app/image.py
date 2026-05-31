@@ -21,14 +21,23 @@ killable on timeout, exactly like the other heavy converters.
 
 from __future__ import annotations
 
+import hashlib
 import io
+import logging
 import subprocess
+import time
 
 from .config import settings
+
+log = logging.getLogger("parser.image")
 
 # Extensions Pillow/tesseract can open. Mirrors the set the backend
 # accepts; tesseract reads all of these, Pillow normalizes for Gemini.
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".tiff", ".tif", ".gif", ".bmp", ".webp"}
+
+# Sentinels the engines emit when an image carries no extractable content —
+# not worth appending to a document's markdown.
+_EMPTY_OCR = {"_(no text detected in image)_", "_(no content extracted)_"}
 
 
 def convert_image(data: bytes, filename: str) -> tuple[str, str, str]:
@@ -44,6 +53,72 @@ def convert_image(data: bytes, filename: str) -> tuple[str, str, str]:
         body, used = _ocr_tesseract(data)
     md = f"# Image: {filename}\n\n{body}"
     return md, body, used
+
+
+def ocr_embedded_images(images: list[tuple[str, bytes]]) -> tuple[str, dict]:
+    """OCR raster images extracted from a container document (PPTX/DOCX).
+
+    `images` is a list of `(label, bytes)` where `label` locates the image
+    (e.g. "Slide 3", "image2.png"). Returns `(section_markdown, stats)`:
+    `section_markdown` is a "## Embedded image text" block (or "" when there's
+    nothing to add) the caller appends to the document markdown, and `stats`
+    reports `images_found / images_ocred / images_skipped`.
+
+    No-op (returns `("", {})`) unless `settings.ocr_embedded_images` is on. To
+    keep cost and latency bounded it: skips images below
+    `embedded_image_min_dimension`, dedups by content hash (repeated logos
+    OCR'd once), caps at `embedded_images_max_per_doc`, and stops once the
+    per-document `embedded_image_ocr_budget_s` wall-clock is spent. Every
+    per-image failure degrades to a skip — embedded OCR never fails the parse.
+    """
+    if not settings.ocr_embedded_images or not images:
+        return "", {}
+
+    from PIL import Image
+
+    deadline = time.monotonic() + settings.embedded_image_ocr_budget_s
+    seen: set[str] = set()
+    parts: list[str] = []
+    found = len(images)
+    ocred = 0
+    skipped = 0
+
+    for label, data in images:
+        if ocred >= settings.embedded_images_max_per_doc or time.monotonic() > deadline:
+            skipped += 1
+            continue
+        digest = hashlib.sha1(data).hexdigest()
+        if digest in seen:
+            skipped += 1
+            continue
+        seen.add(digest)
+        try:
+            with Image.open(io.BytesIO(data)) as im:
+                width, height = im.size
+        except Exception:
+            log.debug("embedded image %s: undecodable, skipping", label, exc_info=True)
+            skipped += 1
+            continue
+        if min(width, height) < settings.embedded_image_min_dimension:
+            skipped += 1
+            continue
+        try:
+            _md, body, _used = convert_image(data, label)
+        except Exception:
+            log.debug("embedded image %s: OCR failed, skipping", label, exc_info=True)
+            skipped += 1
+            continue
+        text = (body or "").strip()
+        if not text or text in _EMPTY_OCR:
+            skipped += 1
+            continue
+        parts.append(f"### {label}\n\n{text}")
+        ocred += 1
+
+    stats = {"images_found": found, "images_ocred": ocred, "images_skipped": skipped}
+    if not parts:
+        return "", stats
+    return "## Embedded image text\n\n" + "\n\n".join(parts), stats
 
 
 # ---------------------------------------------------------------------------

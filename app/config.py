@@ -88,6 +88,22 @@ class Settings(BaseSettings):
     detect_language: bool = True
     language_sample_chars: int = 2000
 
+    # --- Embedded-image OCR (figures inside docs) --------------------------
+    # OFF by default. When on, raster images embedded in PPTX slides and DOCX
+    # (word/media) are OCR'd with the configured image engine and their text
+    # appended under a "## Embedded image text" section — recovering chart /
+    # screenshot / diagram text that the text-layer extractors miss. PDFs are
+    # NOT covered yet (needs the pypdfium2 rasterizer; pairs with the scanned-
+    # PDF fallback). Bounded to keep cost/latency sane: skip tiny images,
+    # dedup repeats (logos), cap count, and a per-document OCR time budget.
+    # Note: PPTX runs in the SIGKILL worker; DOCX runs in-process, so with the
+    # Gemini engine a slow network OCR there isn't kill-protected — prefer
+    # tesseract for DOCX, or accept the per-doc budget as the bound.
+    ocr_embedded_images: bool = False
+    embedded_image_min_dimension: int = 64  # skip icons/bullets below this (px)
+    embedded_images_max_per_doc: int = 20
+    embedded_image_ocr_budget_s: int = 60  # total OCR wall-clock per document
+
     # --- Concurrency ceiling (per uvicorn worker process) ------------------
     # Max HEAVY parses running at once in one worker: legacy soffice
     # round-trips + isolated-worker formats (pdf/office/csv/email/image), each

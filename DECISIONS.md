@@ -528,6 +528,60 @@ fan-out, which is exactly the legacy + isolated set.
 - *A process pool / external queue (Celery/arq)* — the real answer at scale
   (already deferred in §3); the semaphore gives back-pressure without the infra.
 
+## 16. Embedded-image OCR (figures inside PPTX/DOCX)
+
+**Context.** The text-layer extractors miss text that lives *inside* raster
+images — a screenshot pasted on a slide, a chart with embedded labels, a
+scanned figure in a Word doc. For RAG that's often the highest-value content
+on the page, and it was silently dropped.
+
+**Decision.** Opt-in (`PARSER_OCR_EMBEDDED_IMAGES`, default off). When on, the
+PPTX and DOCX parsers extract embedded raster images and run them through the
+**existing** image engine (`convert_image` — tesseract, or Gemini for OCR +
+visual description), appending the recovered text under a `## Embedded image
+text` section. Extraction is per-format; OCR is the shared `ocr_embedded_images`
+helper in `app/image.py`.
+
+- **PPTX**: python-pptx is already opened for structured output; picture
+  shapes expose bytes via `shape.image.blob`, labeled by slide number
+  (`### Slide N`). Runs in the SIGKILL worker, so slow OCR is killable.
+- **DOCX**: images are read straight from `word/media/*` in the zip (labeled by
+  filename). Positional splicing (mapping `<a:blip>` → rels → the sentinel
+  trick already used for OMML) was **not** done — an appended section recovers
+  the text without the fragile per-position injection.
+- **PDF**: deferred. Decodable image bytes need a rasterizer (pypdfium2); this
+  pairs naturally with the scanned-PDF OCR fallback (§5, also deferred) since
+  both need that renderer. Doing them together avoids a half-built PDF path.
+
+**Bounding cost** (the helper): skip images below
+`embedded_image_min_dimension` (icons/bullets/logos), dedup by content hash
+(a logo repeated on every slide is OCR'd once), cap at
+`embedded_images_max_per_doc`, and stop once `embedded_image_ocr_budget_s`
+wall-clock is spent. Counts surface in `stats`
+(`images_found/ocred/skipped`). Every per-image failure degrades to a skip —
+embedded OCR never fails the parse.
+
+**Placement: appended section, not inline.** markitdown's PPTX markdown and
+pandoc's DOCX markdown aren't structured for reliable per-image splicing;
+appending is robust and still lets a chunker index the text. Inline placement
+is a possible refinement (PPTX could splice per `### Slide N`).
+
+**Isolation caveat (DOCX).** DOCX stays in-process (§3/§4). With the **default
+tesseract** engine each OCR is a `subprocess.run(timeout=…)` and the per-doc
+budget bounds the total, so the in-process path is safe. With the **Gemini**
+engine a network call on the in-process DOCX path is not SIGKILL-protected —
+documented; prefer tesseract for DOCX, or move DOCX to `isolation` if Gemini
+embedded OCR becomes a requirement. PPTX has no such caveat (worker-isolated).
+
+**Alternatives.**
+- *Always-on* — rejected: per-image OCR (especially Gemini) adds real latency
+  and cost; most callers don't need it, so it's opt-in.
+- *A second OCR implementation per format* — rejected: reuse the one engine in
+  `app/image.py` so tesseract/Gemini selection, normalization, and timeouts
+  stay in one place.
+- *Inline splicing now* — deferred as a refinement; not worth the fragility
+  against converter-specific markdown for the first cut.
+
 ## Validation against a real corpus
 
 Sampled the `bulk data` Google Drive corpus (~4,600 files) via
