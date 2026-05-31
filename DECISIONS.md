@@ -312,6 +312,31 @@ for image OCR *and* visual analysis (charts/diagrams/photos), which classic
 OCR can't describe. We keep it optional so the service runs with zero keys
 by default, and matches the backend when configured.
 
+**Gemini path is ported verbatim from the backend** (`processing_service.py`),
+not a thinner reimplementation, so an image parses the same here as there:
+- **Two structured calls** — an OCR pass (`_OCRResult`: has_meaningful_text /
+  document_type / extracted_text / confidence) and a visual-analysis pass
+  (`_VisualAnalysisResult`: summary / detected_objects / scene_type), both
+  using `response_mime_type=application/json` + a pydantic `response_schema`.
+  The same `OCR_PROMPT` / `VISUAL_PROMPT` text is used.
+- **Combined** into one searchable block by `_combine` (mirrors the backend's
+  `get_searchable_text`: summary → visual elements → type → extracted text),
+  which is what gets embedded.
+- **Token usage** (input/output/total) is summed across both calls and
+  surfaced in `stats.gemini_tokens` for cost tracking.
+- `document_type` / `scene_type` are promoted into the normalized `metadata`;
+  the richer fields appear in `structured`.
+- **White-background RGB compositing** (`_to_rgb`, the backend's
+  `_convert_to_rgb`) replaces a plain `convert("RGB")` everywhere (tesseract
+  and Gemini), so alpha/palette transparency no longer turns black and wreck
+  OCR. TIFF/GIF → JPEG normalization (Gemini can't take them) is retained.
+- The visual pass is toggleable (`PARSER_IMAGE_VISUAL_ANALYSIS`, the backend's
+  `skip_visual`) for OCR-only at half the calls/cost.
+
+We use the **synchronous** Gemini client (the parser runs in the SIGKILL
+worker / threadpool), where the backend uses the async `aio` client on its
+event loop — same calls, different client flavor to fit our process model.
+
 **Alternatives.**
 - *EasyOCR / PaddleOCR.* Heavy model downloads, GPU-leaning. Rejected for a
   default; tesseract is light and ubiquitous.
@@ -381,6 +406,206 @@ have an emptiness guard (the `needs_ocr` density check), because empty PDF
 text specifically signals a scanned source worth re-routing.
 
 ---
+
+## 13. Security hardening for untrusted uploads (zip-bomb, XXE, AV hook)
+
+**Context.** The service parses arbitrary uploaded files, so every parser is
+an untrusted-input surface. Three concrete exposures were closed.
+
+**Decision — single dispatch chokepoint.** The guards live in `app/security.py`
+and run at the top of `dispatch()` (`main.py`), in the parent process, *before*
+any parser opens the file — whether it runs in-process (docx) or in the
+SIGKILL-able worker (xlsx/pptx), and before the soffice round-trip for legacy
+formats. The worker is only ever spawned from `dispatch`, so one check covers
+both execution paths without duplication.
+
+1. **Decompression bombs (`assert_zip_safe`).** `.docx/.xlsx/.pptx` are ZIP
+   containers; `max_file_mb` caps only the *compressed* upload, so a small
+   archive can expand to gigabytes. The DOCX hybrid path (`hybrid.preprocess`)
+   reads every entry into memory **in-process**, so a bomb there OOMs the
+   uvicorn worker, not the contained child. The guard inspects only the
+   central directory (no extraction) and refuses (HTTP 413) on any of: total
+   uncompressed bytes (`zipbomb_max_uncompressed_mb`, default 1 GB), entry
+   count (`zipbomb_max_entries`, 10k), or per-entry compression ratio
+   (`zipbomb_max_ratio`, 200×) for entries over 1 MiB. The 1 MiB ratio floor
+   stops small, highly-compressible boilerplate (`[Content_Types].xml`) from
+   false-triggering.
+
+2. **XXE / entity expansion (`hybrid.py`).** The one untrusted-bytes XML parse
+   we own is `ET.fromstring` on DOCX OOXML parts. lxml's default parser has
+   `resolve_entities=True` → billion-laughs and `SYSTEM "file://…"` disclosure.
+   We parse those parts with a hardened `_XXE_SAFE_PARSER`
+   (`resolve_entities=False, no_network=True, load_dtd=False, huge_tree=False`).
+   OOXML uses no custom entities, so valid documents are unaffected. (The
+   vendored `omml.py` `load*` helpers also parse, but they are not on our code
+   path — `hybrid` calls `oMath2Latex` on elements already parsed by the
+   hardened parser — so the verbatim vendor file is left untouched.)
+
+3. **Malware scanning (`scan_file`).** Optional, off by default: when
+   `PARSER_SCAN_COMMAND` is set (e.g. `clamdscan --no-summary --fdpass`), every
+   upload is scanned before parsing; a non-zero exit rejects it (HTTP 422). It
+   **fails closed** — a configured-but-missing scanner binary is a 500, never a
+   silent unscanned pass.
+
+**soffice macros.** Headless `--convert-to` does not execute document macros,
+and the throwaway profile starts from "High" macro security, so there is no
+CLI macro-hardening to add. The residual is external/linked content fetches,
+mitigated by the AV scan (pre-soffice) and deployment-layer egress limits.
+
+**Alternatives.**
+- *Guard inside each OOXML parser* — rejected: would duplicate the check across
+  in-process and worker paths and miss the soffice output; the dispatch
+  chokepoint is one place that dominates both.
+- *Bundle ClamAV / a Python AV lib* — rejected: heavy and opinionated for a
+  light service. An optional external-command hook is dependency-free and lets
+  each deployment choose its scanner (or none).
+- *`defusedxml`* — its lxml support is deprecated/limited; configuring lxml's
+  own `XMLParser` flags is the supported, dependency-free hardening.
+
+## 14. Document metadata: one normalized dict across all formats
+
+**Context.** A RAG store needs more than text — it filters and cites on
+document properties (title, author, dates), structural counts (pages, slides,
+sheets), language, and provenance. The service previously returned only
+per-parse `stats` (diagnostics) and, in structured mode, format-specific
+fields; none of it was a normalized, always-present metadata surface.
+
+**Decision.** `ParseResult` gains a `metadata: dict` carried in every response
+and every mode. Unlike `structured` (per-format shape), `metadata` uses ONE
+shared key vocabulary (see `app/metadata.py`): `title/author/created/modified`,
+a format-appropriate count (`page_count`/`slide_count`/`sheet_count`/
+`message_count`), `width/height/image_format` for images, `message_id` for
+email, plus `language` and `source` added by the dispatch layer. Every field
+is optional; `clean()` strips empties so the response advertises only what was
+found. Extraction is strictly best-effort — every reader degrades to `{}` and
+never fails a parse.
+
+**Where each field comes from.**
+- PDF: the pdfplumber `metadata` info dict (Title/Author/CreationDate/ModDate;
+  `parse_pdf_date` normalizes `D:YYYYMMDD…` to ISO-ish) + `page_count`.
+- DOCX/PPTX/XLSX: one shared `ooxml_core_props()` reads `docProps/core.xml`
+  (every OOXML package has it). Counts come cheaply from the zip directory
+  (`ppt/slides/slideN.xml`, `xl/worksheets/sheetN.xml`) so they're available
+  in markdown mode without opening python-pptx/openpyxl. `sheet_names` and CSV
+  `row_count`/`column_count` need the full parse, so they appear only in
+  `structured`/`both` (computing them in markdown mode would parse twice).
+- Email: message headers (subject→title, from→author, Date→created, Message-ID).
+- Images: Pillow header (dimensions + format).
+
+**Language** is detected centrally in the API/CLI layer (`augment()`) from the
+always-computed markdown, so langdetect runs in the parent process — not the
+worker subprocess — and works uniformly for in-process and isolated parsers.
+Deterministic (fixed seed), gated by `PARSER_DETECT_LANGUAGE`, and best-effort
+(None on short/undetectable text).
+
+**Why langdetect.** Pure-Python, no native deps, ~1 MB — fits the light/
+MIT-friendly stack rule. Heavier detectors (fastText/lingua/cld3) buy accuracy
+the RAG-metadata use case doesn't need.
+
+**Alternatives.**
+- *Reuse `stats`* — rejected: `stats` is diagnostics (equation counts, etc.),
+  not retrievable metadata; conflating them muddies both.
+- *Only expose metadata in structured mode* — rejected: a markdown-only
+  embedder still wants title/language/source for filtering; cheap fields are
+  always on, expensive ones (`sheet_names`/row counts) gate on the parse cost.
+- *python-docx/openpyxl for OOXML props* — rejected: opening the whole document
+  just for four properties is far more expensive than reading one zip member;
+  `ooxml_core_props` parses only `docProps/core.xml` (with the §13 hardened
+  parser, since it's untrusted XML).
+
+**OOXML XML is parsed with the §13 XXE-safe parser** — `core.xml` is attacker-
+controlled, so the same hardened lxml parser (no entity/network/DTD) is reused.
+
+## 15. Concurrency ceiling for heavy converters (per worker)
+
+**Context.** `convert()` runs the blocking `dispatch()` via
+`run_in_threadpool` so one uvicorn worker doesn't stall its event loop (see
+§3). But the threadpool (anyio's default ~40 tokens) put no ceiling on how many
+heavy parses run at once: an inbound burst could fan out to dozens of
+simultaneous `soffice` / `python -m app.worker` subprocesses, and with N
+uvicorn workers that multiplies to N×40. The only backstop was the container
+`mem_limit`, which OOM-kills the offender rather than applying back-pressure.
+
+**Decision.** An `asyncio.Semaphore(max_concurrent_heavy_parses)` (default 4)
+gates the **heavy** path only — legacy soffice round-trips and isolated-worker
+formats (pdf/office/csv/email/image). Requests past the limit await the
+semaphore (queue) instead of spawning another subprocess. Light in-process
+formats (text/json/html/rtf/docx) acquire a `nullcontext` and run ungated, so a
+quick `.txt`/`.json` is never stuck behind a soffice burst. `_is_heavy(ext)`
+decides from the registry (LEGACY membership or `parser.isolation`).
+
+**Why per-process (not global).** The semaphore lives in each worker's event
+loop; effective cluster concurrency is `UVICORN_WORKERS × max_concurrent_heavy_parses`.
+A cross-process ceiling would need shared state (Redis/a file lock) — overkill
+for a service whose deployment already fixes the worker count. Operators size
+the two knobs together against `PARSER_MEM_LIMIT` and per-file peak RSS.
+
+**Why gate only heavy work.** The whole point of §3's threadpool move was
+concurrent service from one worker; gating *everything* at 4 would needlessly
+serialize trivial requests. The risk being bounded is subprocess/​memory
+fan-out, which is exactly the legacy + isolated set.
+
+**Alternatives.**
+- *Bound all dispatches with one semaphore* — simpler, but throttles light
+  requests for no memory benefit; rejected.
+- *Lower the anyio threadpool limiter* — blunt (affects every `run_in_threadpool`
+  in the process, not just parses) and not format-aware; rejected.
+- *A process pool / external queue (Celery/arq)* — the real answer at scale
+  (already deferred in §3); the semaphore gives back-pressure without the infra.
+
+## 16. Embedded-image OCR (figures inside PPTX/DOCX)
+
+**Context.** The text-layer extractors miss text that lives *inside* raster
+images — a screenshot pasted on a slide, a chart with embedded labels, a
+scanned figure in a Word doc. For RAG that's often the highest-value content
+on the page, and it was silently dropped.
+
+**Decision.** Opt-in (`PARSER_OCR_EMBEDDED_IMAGES`, default off). When on, the
+PPTX and DOCX parsers extract embedded raster images and run them through the
+**existing** image engine (`convert_image` — tesseract, or Gemini for OCR +
+visual description), appending the recovered text under a `## Embedded image
+text` section. Extraction is per-format; OCR is the shared `ocr_embedded_images`
+helper in `app/image.py`.
+
+- **PPTX**: python-pptx is already opened for structured output; picture
+  shapes expose bytes via `shape.image.blob`, labeled by slide number
+  (`### Slide N`). Runs in the SIGKILL worker, so slow OCR is killable.
+- **DOCX**: images are read straight from `word/media/*` in the zip (labeled by
+  filename). Positional splicing (mapping `<a:blip>` → rels → the sentinel
+  trick already used for OMML) was **not** done — an appended section recovers
+  the text without the fragile per-position injection.
+- **PDF**: deferred. Decodable image bytes need a rasterizer (pypdfium2); this
+  pairs naturally with the scanned-PDF OCR fallback (§5, also deferred) since
+  both need that renderer. Doing them together avoids a half-built PDF path.
+
+**Bounding cost** (the helper): skip images below
+`embedded_image_min_dimension` (icons/bullets/logos), dedup by content hash
+(a logo repeated on every slide is OCR'd once), cap at
+`embedded_images_max_per_doc`, and stop once `embedded_image_ocr_budget_s`
+wall-clock is spent. Counts surface in `stats`
+(`images_found/ocred/skipped`). Every per-image failure degrades to a skip —
+embedded OCR never fails the parse.
+
+**Placement: appended section, not inline.** markitdown's PPTX markdown and
+pandoc's DOCX markdown aren't structured for reliable per-image splicing;
+appending is robust and still lets a chunker index the text. Inline placement
+is a possible refinement (PPTX could splice per `### Slide N`).
+
+**Isolation caveat (DOCX).** DOCX stays in-process (§3/§4). With the **default
+tesseract** engine each OCR is a `subprocess.run(timeout=…)` and the per-doc
+budget bounds the total, so the in-process path is safe. With the **Gemini**
+engine a network call on the in-process DOCX path is not SIGKILL-protected —
+documented; prefer tesseract for DOCX, or move DOCX to `isolation` if Gemini
+embedded OCR becomes a requirement. PPTX has no such caveat (worker-isolated).
+
+**Alternatives.**
+- *Always-on* — rejected: per-image OCR (especially Gemini) adds real latency
+  and cost; most callers don't need it, so it's opt-in.
+- *A second OCR implementation per format* — rejected: reuse the one engine in
+  `app/image.py` so tesseract/Gemini selection, normalization, and timeouts
+  stay in one place.
+- *Inline splicing now* — deferred as a refinement; not worth the fragility
+  against converter-specific markdown for the first cut.
 
 ## Validation against a real corpus
 

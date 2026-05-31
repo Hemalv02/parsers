@@ -11,6 +11,9 @@ from pathlib import Path
 
 from markitdown.converters import PptxConverter
 
+from ..config import settings
+from ..image import ocr_embedded_images
+from ..metadata import ooxml_core_props, pptx_slide_count
 from .base import BaseParser, ParseResult
 from .markitdown_util import convert_with_markitdown
 
@@ -22,8 +25,42 @@ class PptxParser(BaseParser):
 
     def parse(self, path: Path, mode: str) -> ParseResult:
         md = convert_with_markitdown(PptxConverter, ".pptx", path)
+        section, ocr_stats = ocr_embedded_images(self._slide_images(path))
+        if section:
+            md = f"{md}\n\n{section}"
         structured = self._structured(path) if self.wants_structured(mode) else None
-        return ParseResult(parser=self.name, markdown=md, structured=structured)
+        metadata = ooxml_core_props(path)
+        slides = pptx_slide_count(path)
+        if slides is not None:
+            metadata["slide_count"] = slides
+        return ParseResult(
+            parser=self.name,
+            markdown=md,
+            structured=structured,
+            metadata=metadata,
+            stats=ocr_stats,
+        )
+
+    @staticmethod
+    def _slide_images(path: Path) -> list[tuple[str, bytes]]:
+        """(label, bytes) for each picture shape, labeled by slide number.
+        Empty unless embedded-image OCR is on (skips the python-pptx reopen)."""
+        if not settings.ocr_embedded_images:
+            return []
+        from pptx import Presentation
+        from pptx.enum.shapes import MSO_SHAPE_TYPE
+
+        out: list[tuple[str, bytes]] = []
+        prs = Presentation(str(path))
+        for i, slide in enumerate(prs.slides, start=1):
+            for shape in slide.shapes:
+                if shape.shape_type != MSO_SHAPE_TYPE.PICTURE:
+                    continue
+                try:
+                    out.append((f"Slide {i}", shape.image.blob))
+                except Exception:
+                    continue
+        return out
 
     def _structured(self, path: Path) -> dict:
         from pptx import Presentation

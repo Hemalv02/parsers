@@ -31,6 +31,26 @@ class Settings(BaseSettings):
     # giant file can't fill the disk or OOM a worker. 0 disables the cap.
     max_file_mb: int = 100
 
+    # --- Security: decompression-bomb guard (OOXML zips) -------------------
+    # .docx/.xlsx/.pptx are ZIP containers; the upload cap above bounds only
+    # the COMPRESSED bytes, so a small archive can still expand to gigabytes
+    # in memory. `app/security.py` inspects the central directory at dispatch
+    # and refuses an archive that breaches any of these (HTTP 413). Generous
+    # defaults: real OOXML XML compresses ~10-20x and a whole document rarely
+    # exceeds tens of MB uncompressed, so legitimate files clear them easily.
+    zipbomb_max_uncompressed_mb: int = 1024  # total uncompressed across entries
+    zipbomb_max_entries: int = 10_000  # entry count
+    zipbomb_max_ratio: int = 200  # per-entry compress ratio (entries > 1 MiB)
+
+    # --- Security: optional external malware-scan hook ---------------------
+    # Shell-style command run on every upload before parsing (and before the
+    # soffice round-trip for legacy formats). The file path is appended as the
+    # final argument; a non-zero exit rejects the file (HTTP 422). Unset by
+    # default — no AV dependency is bundled. Example:
+    #   PARSER_SCAN_COMMAND="clamdscan --no-summary --fdpass"
+    scan_command: str | None = None
+    scan_timeout_s: int = 60
+
     # --- MIME verification (front-door guard) ------------------------------
     # When true, sniff the uploaded bytes with libmagic and, for the few
     # UNAMBIGUOUS binary families (PDF, images), re-route by content when the
@@ -58,6 +78,42 @@ class Settings(BaseSettings):
     # the backend's MAX_ROWS_PER_SHEET; protects against giant spreadsheets
     # ballooning the JSON response.
     max_rows_per_sheet: int = 10_000
+
+    # --- Metadata ----------------------------------------------------------
+    # Every /convert response carries a normalized `metadata` dict (title,
+    # author, dates, page/slide/sheet counts, language, source filename) for
+    # RAG filtering and citation — see app/metadata.py. Language is detected
+    # from the markdown body with langdetect; disable if you don't want the
+    # per-request cost, or tune how much text it samples.
+    detect_language: bool = True
+    language_sample_chars: int = 2000
+
+    # --- Embedded-image OCR (figures inside docs) --------------------------
+    # OFF by default. When on, raster images embedded in PPTX slides and DOCX
+    # (word/media) are OCR'd with the configured image engine and their text
+    # appended under a "## Embedded image text" section — recovering chart /
+    # screenshot / diagram text that the text-layer extractors miss. PDFs are
+    # NOT covered yet (needs the pypdfium2 rasterizer; pairs with the scanned-
+    # PDF fallback). Bounded to keep cost/latency sane: skip tiny images,
+    # dedup repeats (logos), cap count, and a per-document OCR time budget.
+    # Note: PPTX runs in the SIGKILL worker; DOCX runs in-process, so with the
+    # Gemini engine a slow network OCR there isn't kill-protected — prefer
+    # tesseract for DOCX, or accept the per-doc budget as the bound.
+    ocr_embedded_images: bool = False
+    embedded_image_min_dimension: int = 64  # skip icons/bullets below this (px)
+    embedded_images_max_per_doc: int = 20
+    embedded_image_ocr_budget_s: int = 60  # total OCR wall-clock per document
+
+    # --- Concurrency ceiling (per uvicorn worker process) ------------------
+    # Max HEAVY parses running at once in one worker: legacy soffice
+    # round-trips + isolated-worker formats (pdf/office/csv/email/image), each
+    # of which spawns a memory-hungry subprocess. Without this, FastAPI's
+    # threadpool lets an inbound burst fan out to dozens of simultaneous
+    # soffice / `python -m app.worker` processes and OOM the host; excess
+    # requests instead queue (back-pressure). Light in-process formats
+    # (text/json/html/rtf/docx) are NOT gated. Effective cluster concurrency =
+    # UVICORN_WORKERS x this — size against PARSER_MEM_LIMIT and per-file peak.
+    max_concurrent_heavy_parses: int = 4
 
     # --- Subprocess / converter timeouts (seconds) -------------------------
     # markitdown (pptx/xlsx), csv, pdf, email, and image all run in the
@@ -116,6 +172,11 @@ class Settings(BaseSettings):
     # Backend uses gemini-2.5-flash for image OCR + visual analysis.
     gemini_api_key: str | None = None
     gemini_model: str = "gemini-2.5-flash"
+    # Backend parity: the Gemini engine runs OCR *and* a visual-analysis pass
+    # (summary, detected objects, scene type) and combines them into one
+    # searchable block. Disable the visual pass for OCR-only (halves the
+    # Gemini calls/cost per image). Matches the backend's skip_visual.
+    image_visual_analysis: bool = True
     # Image preprocessing for the Gemini path (from backend/preprocessing.py).
     image_max_bytes: int = 5 * 1024 * 1024  # 5 MB Gemini/embedding ceiling
     image_min_dimension: int = 56

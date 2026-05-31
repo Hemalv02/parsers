@@ -27,8 +27,12 @@ services:
       # PARSER_IMAGE_OCR_ENGINE: "auto"          # tesseract | gemini | auto
       # PARSER_GEMINI_API_KEY: "..."             # needed only for gemini OCR
       # PARSER_MARKITDOWN_TIMEOUT_S: "60"
+      # Concurrent heavy parses per worker; cluster total = workers x this.
+      # PARSER_MAX_CONCURRENT_HEAVY_PARSES: "4"
     # Parsing is CPU-bound and the dispatch path blocks (soffice/worker
     # subprocesses), so run a few uvicorn workers for real concurrency.
+    # Heavy parses per worker are capped (PARSER_MAX_CONCURRENT_HEAVY_PARSES);
+    # effective concurrency is UVICORN_WORKERS x that — size with mem_limit.
     command:
       - uvicorn
       - app.main:app

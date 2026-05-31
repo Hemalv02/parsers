@@ -13,6 +13,7 @@ from pathlib import Path
 from markitdown.converters import XlsxConverter
 
 from ..config import settings
+from ..metadata import ooxml_core_props, xlsx_sheet_count
 from .base import BaseParser, ParseResult
 from .markitdown_util import convert_with_markitdown
 
@@ -25,7 +26,15 @@ class XlsxParser(BaseParser):
     def parse(self, path: Path, mode: str) -> ParseResult:
         md = convert_with_markitdown(XlsxConverter, ".xlsx", path)
         structured = self._structured(path) if self.wants_structured(mode) else None
-        return ParseResult(parser=self.name, markdown=md, structured=structured)
+        metadata = ooxml_core_props(path)
+        sheets = xlsx_sheet_count(path)
+        if sheets is not None:
+            metadata["sheet_count"] = sheets
+        # Sheet names need the workbook parsed; surface them only when we
+        # already paid for the structured pass.
+        if structured:
+            metadata["sheet_names"] = [s["name"] for s in structured["sheets"]]
+        return ParseResult(parser=self.name, markdown=md, structured=structured, metadata=metadata)
 
     def _structured(self, path: Path) -> dict:
         import pandas as pd

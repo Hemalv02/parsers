@@ -44,13 +44,17 @@ class ParseResult:
     `parser` is the engine label (e.g. "hybrid", "markitdown-pdf+pages").
     `structured` is None unless the parser built a per-format representation.
     `stats` carries optional per-parse diagnostics (e.g. hybrid equation
-    counts).
+    counts). `metadata` is normalized, retrievable document metadata
+    (title/author/dates/counts) with a key vocabulary shared across formats —
+    see app/metadata.py. The dispatch layer augments it with the detected
+    `language` and the original `source` filename.
     """
 
     parser: str
     markdown: str
     structured: dict | None = None
     stats: dict = field(default_factory=dict)
+    metadata: dict = field(default_factory=dict)
 
 
 class BaseParser(ABC):

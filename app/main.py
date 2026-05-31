@@ -13,6 +13,8 @@ structured data only, or both. Default comes from `settings.default_output_mode`
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
 import logging
 import shutil
@@ -26,8 +28,10 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
 
 from .config import settings
-from .exceptions import UnsupportedFile
-from .parsers import ALL_SUPPORTED, LEGACY, get_parser
+from .exceptions import DecompressionBombError, MaliciousFileError, UnsupportedFile
+from .metadata import augment as augment_metadata
+from .parsers import ALL_SUPPORTED, LEGACY, NATIVE, get_parser
+from .security import assert_zip_safe, scan_file
 
 # The worker runs as a module so it resolves package-relative imports
 # regardless of install location.
@@ -41,6 +45,25 @@ logging.basicConfig(
 log = logging.getLogger("parser")
 
 app = FastAPI(title="parser-service", version="0.1.0")
+
+# Per-worker ceiling on concurrent HEAVY parses (legacy soffice round-trips +
+# isolated-worker formats). `run_in_threadpool` + uvicorn's threadpool would
+# otherwise let an inbound burst fan out to dozens of simultaneous
+# soffice / `python -m app.worker` subprocesses and OOM the host; this bounds
+# them and makes excess requests queue (back-pressure) instead. Light
+# in-process formats (text/json/html/rtf/docx) are not gated. Per process, so
+# cluster concurrency is UVICORN_WORKERS x this — see DECISIONS.md §15.
+_heavy_semaphore = asyncio.Semaphore(settings.max_concurrent_heavy_parses)
+
+
+def _is_heavy(ext: str) -> bool:
+    """True if dispatching `ext` will spawn a memory-heavy subprocess worth
+    bounding: a legacy soffice round-trip, or an isolated-worker parser
+    (pdf/office/csv/email/image)."""
+    if ext in LEGACY:
+        return True
+    parser = NATIVE.get(ext)
+    return bool(parser and parser.isolation)
 
 
 def _raise_for_error_kind(data: dict) -> None:
@@ -99,7 +122,15 @@ def run_isolated(path: Path, mode: str) -> dict:
 
 def dispatch(path: Path, tmpdir: Path, mode: str) -> dict:
     """Route a file to its parser and return {parser, markdown, structured,
-    stats}. Legacy Office formats are converted via soffice first."""
+    stats}. Legacy Office formats are converted via soffice first.
+
+    Security guards run first, in this parent process, before any parser (or
+    the soffice round-trip, or the SIGKILL worker) opens the file: an optional
+    malware scan, then a decompression-bomb check on ZIP-container uploads.
+    """
+    scan_file(path)  # no-op unless PARSER_SCAN_COMMAND is configured
+    assert_zip_safe(path)  # no-op for non-zip inputs
+
     ext = path.suffix.lower()
 
     if ext in LEGACY:
@@ -120,6 +151,7 @@ def dispatch(path: Path, tmpdir: Path, mode: str) -> dict:
         "markdown": result.markdown,
         "structured": result.structured,
         "stats": result.stats,
+        "metadata": result.metadata,
     }
 
 
@@ -188,29 +220,45 @@ async def convert(
 
         src_bytes = src.stat().st_size
         log.info("converting %s (%s bytes, mode=%s)", file.filename, src_bytes, mode)
+        # Bound concurrent heavy parses per worker; light formats run ungated so
+        # a quick .txt/.json isn't queued behind a soffice/worker burst.
+        gate = _heavy_semaphore if _is_heavy(ext) else contextlib.nullcontext()
         try:
             # dispatch() is blocking (soffice / worker subprocess.run); run it
             # in a threadpool so a single uvicorn worker can serve concurrent
             # requests instead of stalling the event loop.
-            result = await run_in_threadpool(dispatch, src, tmpdir, mode)
+            async with gate:
+                result = await run_in_threadpool(dispatch, src, tmpdir, mode)
         except HTTPException:
             raise
         except UnsupportedFile as exc:
             raise HTTPException(415, str(exc)) from None
+        except DecompressionBombError as exc:
+            log.warning("decompression bomb rejected: %s", exc)
+            raise HTTPException(413, f"decompression_bomb: {exc}") from None
+        except MaliciousFileError as exc:
+            log.warning("upload rejected by malware scanner: %s", exc)
+            raise HTTPException(422, f"malicious_file: {exc}") from None
         except subprocess.TimeoutExpired:
             raise HTTPException(504, "converter timed out") from None
         except Exception as exc:
             log.exception("conversion failed")
             raise HTTPException(500, f"conversion failed: {type(exc).__name__}: {exc}") from exc
 
-    # Build the response per mode. parser/filename/bytes/stats are always
-    # present; markdown and/or structured depend on the requested mode.
+    # Build the response per mode. parser/filename/bytes/stats/metadata are
+    # always present; markdown and/or structured depend on the requested mode.
+    # Metadata is augmented with the detected language (from the always-computed
+    # markdown) and the original filename, so it's returned in every mode.
+    metadata = augment_metadata(
+        result.get("metadata", {}), result.get("markdown", ""), file.filename
+    )
     response: dict = {
         "parser": result["parser"],
         "mode": mode,
         "filename": file.filename,
         "bytes": src_bytes,
         "stats": result.get("stats", {}),
+        "metadata": metadata,
     }
     if mode in ("markdown", "both"):
         response["markdown"] = result["markdown"]
